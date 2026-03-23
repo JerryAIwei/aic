@@ -27,6 +27,17 @@ This makes **ACT (Action Chunking with Transformers)** the lowest-friction path 
 
 **Goal**: Confirm the simulation and tooling work end-to-end before any training.
 
+Start the video recorder in a dedicated terminal before running any policy — it will auto-record every trial:
+```bash
+pixi run python aic_bringup/scripts/record_run.py
+```
+
+- [x] **Video recorder built** — `aic_bringup/scripts/record_run.py`
+  - Subscribes to all 3 wrist cameras and `/insert_cable/_action/status`
+  - Starts/stops recording automatically on each trial (goal EXECUTING → terminal)
+  - Saves side-by-side composite MP4 to `$AIC_RESULTS_DIR/videos/<timestamp>_<success|failed>.mp4`
+  - 25% downscale (864×256), REC overlay with elapsed time
+
 - [ ] Launch simulation in `dev` mode and verify all sensors are visible
   ```bash
   ros2 launch aic_bringup aic_gz_bringup.launch.py ground_truth:=true spawn_task_board:=true
@@ -36,7 +47,7 @@ This makes **ACT (Action Chunking with Transformers)** the lowest-friction path 
   ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.CheatCode
   ```
 - [ ] Run `RunACT` with the pretrained HuggingFace checkpoint (`grkw/aic_act_policy`) to establish a baseline score
-- [ ] Record what the `CheatCode` policy's TCP trajectory looks like (use PlotJuggler or `ros2 bag record`) — this is the "oracle" motion to imitate
+- [ ] Review video recordings to understand what the `CheatCode` oracle trajectory looks like — this is the motion to imitate
 
 ---
 
@@ -139,26 +150,13 @@ The competition explicitly encourages training across MuJoCo / Isaac Sim for sim
 
 **Goal**: Close the loop between training and scoring.
 
-### 3.0 Video Recorder Tool
+### 3.0 Video Recorder Tool ✓
 
-Cloud evaluation runs produce only a score — without video, failures are opaque. Build a standalone recorder node that captures every trial as an MP4 saved alongside the scoring output in `$AIC_RESULTS_DIR`.
-
-**Implementation** — `aic_bringup/scripts/record_run.py`:
-- Subscribe to `/left_camera/image`, `/center_camera/image`, `/right_camera/image` (all at 20 Hz, 1152×1024)
-- Watch the `/insert_cable` action server: start recording on goal accepted, stop on result
-- Write a side-by-side composite frame (3×downscaled images concatenated horizontally) using `cv2.VideoWriter` with the `mp4v` codec
-- Save to `$AIC_RESULTS_DIR/<ISO-timestamp>_trial.mp4` so each run has its own file
-
-**Dependencies**: `opencv-python` (already in pixi as `opencv<4.13.0`), `rclpy`, `sensor_msgs`, `action_msgs`
-
-**Usage** — run in a separate terminal alongside any policy:
+`aic_bringup/scripts/record_run.py` — run in a dedicated terminal alongside any policy:
 ```bash
 pixi run python aic_bringup/scripts/record_run.py
 ```
-
-**Naming convention**: include the trial timestamp and (optionally) the score from the engine result so files are self-describing, e.g. `2026-03-23T14-05-22_score-82.mp4`.
-
-**Tip**: downscale each camera frame to 25% (matching `RunACT.py`'s `image_scaling = 0.25`) before writing, to keep file sizes manageable without losing diagnostic detail.
+Auto-records every trial (start on EXECUTING, stop on terminal status). Saves `$AIC_RESULTS_DIR/videos/<timestamp>_<success|failed>.mp4` with a side-by-side composite of all 3 cameras at 25% scale.
 
 ### 3.1 Local Evaluation
 
@@ -260,4 +258,4 @@ Test the container locally before submitting.
 | `docs/scoring.md` | Full scoring breakdown |
 | `docs/qualification_phase.md` | Trial descriptions and randomization ranges |
 | `docker/aic_model/Dockerfile` | Submission container definition |
-| `aic_bringup/scripts/record_run.py` | Per-trial video recorder (to be built — see Phase 3.0) |
+| `aic_bringup/scripts/record_run.py` | Per-trial video recorder — run alongside any policy (see Phase 3.0) |
