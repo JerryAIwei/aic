@@ -1,0 +1,34 @@
+{
+  "model": {
+    "policy": "ACT (lerobot 0.5.1)",
+    "vision_backbone": "ResNet18",
+    "dim_model": 256,
+    "n_heads": 8,
+    "n_enc_layers": 4,
+    "n_dec_layers": 4,
+    "chunk_size": 20,
+    "n_action_steps": 10,
+    "latent_dim": 32,
+    "n_params": 28182278,
+    "obs_dims": {
+      "state": 26,
+      "images": "1 \u00d7 (128\u00d7144) center_camera"
+    },
+    "note": "Add left/right cameras at 256\u00d7288 for real AIC robot deployment",
+    "action_dim": 6
+  },
+  "training": {
+    "steps": 3000,
+    "batch_size": 8,
+    "lr": 1e-05,
+    "weight_decay": 0.0001,
+    "kl_weight": 10.0,
+    "save_every": 5
+  },
+  "dataset": {
+    "repo_id": "local/aic_cable_insertion",
+    "n_train": 2040,
+    "n_val": 360,
+    "total_episodes": 130
+  }
+}

@@ -1,0 +1,6 @@
+# Model checkpoints (large binaries — use lerobot save_pretrained to restore)
+checkpoints_lerobot/
+
+# Python cache
+__pycache__/
+*.pyc

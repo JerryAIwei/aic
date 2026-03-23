@@ -1,0 +1,10 @@
+# Generated dataset (re-create with generate_dataset.py)
+data/train/
+data/val/
+
+# Model checkpoints (large binaries)
+checkpoints/
+
+# Python cache
+__pycache__/
+*.pyc
