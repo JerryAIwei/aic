@@ -37,6 +37,11 @@ pixi run python aic_bringup/scripts/record_run.py
   - Starts/stops recording automatically on each trial (goal EXECUTING → terminal)
   - Saves side-by-side composite MP4 to `$AIC_RESULTS_DIR/videos/<timestamp>_<success|failed>.mp4`
   - 25% downscale (864×256), REC overlay with elapsed time
+  - **Validated**: produced `2026-03-23T07-43-49_wavearm_trial1_partial.mp4` — 3784 frames @ 20fps, 864×256, all 3 cameras rendering
+
+- [x] **GPU note**: simulation must run via the `aic_eval` Docker container with `--nvidia` flag (distrobox).
+  Running from the rootfs chroot without proper NVIDIA device access results in CPU-only rendering (<1% RT factor).
+  Commands below assume the proper Docker/distrobox workflow (see `docs/getting_started.md`).
 
 - [ ] Launch simulation in `dev` mode and verify all sensors are visible
   ```bash
