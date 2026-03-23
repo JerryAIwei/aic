@@ -1,8 +1,5 @@
 # Training Plan: Cable Insertion Policy
 
-## sugestion
-- build a tool to record every policy run as a video to make debug on cloud easier
-
 ## Goal
 
 Train a policy that achieves high scores across all three qualification trials:
@@ -142,6 +139,27 @@ The competition explicitly encourages training across MuJoCo / Isaac Sim for sim
 
 **Goal**: Close the loop between training and scoring.
 
+### 3.0 Video Recorder Tool
+
+Cloud evaluation runs produce only a score — without video, failures are opaque. Build a standalone recorder node that captures every trial as an MP4 saved alongside the scoring output in `$AIC_RESULTS_DIR`.
+
+**Implementation** — `aic_bringup/scripts/record_run.py`:
+- Subscribe to `/left_camera/image`, `/center_camera/image`, `/right_camera/image` (all at 20 Hz, 1152×1024)
+- Watch the `/insert_cable` action server: start recording on goal accepted, stop on result
+- Write a side-by-side composite frame (3×downscaled images concatenated horizontally) using `cv2.VideoWriter` with the `mp4v` codec
+- Save to `$AIC_RESULTS_DIR/<ISO-timestamp>_trial.mp4` so each run has its own file
+
+**Dependencies**: `opencv-python` (already in pixi as `opencv<4.13.0`), `rclpy`, `sensor_msgs`, `action_msgs`
+
+**Usage** — run in a separate terminal alongside any policy:
+```bash
+pixi run python aic_bringup/scripts/record_run.py
+```
+
+**Naming convention**: include the trial timestamp and (optionally) the score from the engine result so files are self-describing, e.g. `2026-03-23T14-05-22_score-82.mp4`.
+
+**Tip**: downscale each camera frame to 25% (matching `RunACT.py`'s `image_scaling = 0.25`) before writing, to keep file sizes manageable without losing diagnostic detail.
+
 ### 3.1 Local Evaluation
 
 Run the full engine evaluation to get a numerical score:
@@ -242,3 +260,4 @@ Test the container locally before submitting.
 | `docs/scoring.md` | Full scoring breakdown |
 | `docs/qualification_phase.md` | Trial descriptions and randomization ranges |
 | `docker/aic_model/Dockerfile` | Submission container definition |
+| `aic_bringup/scripts/record_run.py` | Per-trial video recorder (to be built — see Phase 3.0) |
