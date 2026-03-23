@@ -1,5 +1,8 @@
 # Training Plan: Cable Insertion Policy
 
+## sugestion
+- build a tool to record every policy run as a video to make debug on cloud easier
+
 ## Goal
 
 Train a policy that achieves high scores across all three qualification trials:
