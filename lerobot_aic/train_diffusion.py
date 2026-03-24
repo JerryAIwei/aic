@@ -51,7 +51,7 @@ from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
-REPO_ID  = "local/aic_cable_insertion_large"
+REPO_ID  = "local/aic_cable_insertion_large"   # overridden by --repo_id
 OUT_DIR  = Path(__file__).parent / "outputs_diffusion"
 CKPT_DIR = Path(__file__).parent / "checkpoints_diffusion"
 
@@ -136,9 +136,10 @@ class DiffusionTrainer:
         print(f"Device : {self.device}")
 
         # ── Dataset ──────────────────────────────────────────────────────────
-        print(f"Loading dataset: {REPO_ID} …")
+        repo_id = cfg.get("repo_id") or REPO_ID
+        print(f"Loading dataset: {repo_id} …")
         self.full_ds = LeRobotDataset(
-            repo_id=REPO_ID,
+            repo_id=repo_id,
             delta_timestamps={
                 "observation.state": [0.0, -1 / FPS],
                 "observation.images.center_camera": [0.0, -1 / FPS],
@@ -186,8 +187,11 @@ class DiffusionTrainer:
         )
 
         # ── Logging ──────────────────────────────────────────────────────────
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        CKPT_DIR.mkdir(parents=True, exist_ok=True)
+        tag = cfg.get("run_name") or (cfg.get("repo_id", "").split("/")[-1] if cfg.get("repo_id") else "")
+        self.out_dir  = Path(__file__).parent / (f"outputs_diffusion_{tag}"  if tag else "outputs_diffusion")
+        self.ckpt_dir = Path(__file__).parent / (f"checkpoints_diffusion_{tag}" if tag else "checkpoints_diffusion")
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.history: list[dict] = []
         self.best_val = float("inf")
         self.global_step = 0
@@ -207,12 +211,12 @@ class DiffusionTrainer:
             },
             "training": cfg,
             "dataset": {
-                "repo_id": REPO_ID,
+                "repo_id": repo_id,
                 "n_train": n_train,
                 "n_val":   n_val,
                 "cameras": ["center_camera", "left_camera", "right_camera"],
             },
-        }, open(OUT_DIR / "run_config.json", "w"), indent=2)
+        }, open(self.out_dir / "run_config.json", "w"), indent=2)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -268,10 +272,10 @@ class DiffusionTrainer:
             is_best = v_m["loss"] < self.best_val
             if is_best:
                 self.best_val = v_m["loss"]
-                self.model.save_pretrained(str(CKPT_DIR / "best_model"))
+                self.model.save_pretrained(str(self.ckpt_dir / "best_model"))
 
             if epoch % self.cfg.get("save_every", 5) == 0:
-                self.model.save_pretrained(str(CKPT_DIR / f"checkpoint_epoch_{epoch:03d}"))
+                self.model.save_pretrained(str(self.ckpt_dir / f"checkpoint_epoch_{epoch:03d}"))
 
             self.history.append({
                 "epoch": epoch, "step": self.global_step, "lr": lr,
@@ -282,15 +286,15 @@ class DiffusionTrainer:
             print(f"{epoch:>6}  {lr:>9.2e}  {t_m['loss']:>9.5f}  {v_m['loss']:>9.5f}  "
                   f"{'✓' if is_best else '':>5}   {time.time()-t0:.1f}s")
 
-        self.model.save_pretrained(str(CKPT_DIR / "final_model"))
+        self.model.save_pretrained(str(self.ckpt_dir / "final_model"))
         print(f"\nDone. Best val loss: {self.best_val:.5f}")
-        print(f"Artifacts → {OUT_DIR}  and  {CKPT_DIR}")
+        print(f"Artifacts → {self.out_dir}  and  {self.ckpt_dir}")
 
     def _save_metrics(self):
-        with open(OUT_DIR / "metrics.json", "w") as f:
+        with open(self.out_dir / "metrics.json", "w") as f:
             json.dump(self.history, f, indent=2)
         if self.history:
-            with open(OUT_DIR / "metrics.csv", "w", newline="") as f:
+            with open(self.out_dir / "metrics.csv", "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=list(self.history[0].keys()))
                 w.writeheader()
                 w.writerows(self.history)
@@ -309,10 +313,20 @@ def parse_args():
     p.add_argument("--weight_decay", type=float, default=1e-6)
     p.add_argument("--save_every",   type=int,   default=5,
                    help="Save checkpoint every N epochs")
+    p.add_argument("--repo_id",      type=str,   default=None,
+                   help="Override dataset repo_id (default: local/aic_cable_insertion_large)")
+    p.add_argument("--run_name",     type=str,   default=None,
+                   help="Tag appended to output/checkpoint dirs (e.g. 'sim')")
     return vars(p.parse_args())
 
 
 if __name__ == "__main__":
     cfg = parse_args()
+    # Allow overriding dataset and output dirs at runtime
+    if cfg.get("repo_id"):
+        REPO_ID = cfg["repo_id"]
+        tag = cfg.get("run_name") or REPO_ID.split("/")[-1]
+        OUT_DIR  = Path(__file__).parent / f"outputs_diffusion_{tag}"
+        CKPT_DIR = Path(__file__).parent / f"checkpoints_diffusion_{tag}"
     trainer = DiffusionTrainer(cfg)
     trainer.train()
