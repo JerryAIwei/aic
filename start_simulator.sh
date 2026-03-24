@@ -183,7 +183,7 @@ run_eval() {
   echo "--> Launching simulation + engine (foreground)..."
   AIC_RESULTS_DIR="$RESULTS_DIR" \
   ros2 launch aic_bringup aic_gz_bringup.launch.py \
-    ground_truth:=false \
+    ground_truth:=true \
     start_aic_engine:=true
 }
 
