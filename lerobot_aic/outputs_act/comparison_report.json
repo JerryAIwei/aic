@@ -1,0 +1,26 @@
+{
+  "act": {
+    "policy": "ACT",
+    "n_params": 28182278,
+    "n_epochs": 9,
+    "n_steps": 4779,
+    "final_train": 1.0752160708558538,
+    "final_val": 1.0692174005508424,
+    "best_val": 1.0692174005508424,
+    "best_val_epoch": 9,
+    "conv_epoch": 6,
+    "act_policy": "ACT"
+  },
+  "diffusion": {
+    "policy": "Diffusion Policy",
+    "n_params": 80435750,
+    "n_epochs": 9,
+    "n_steps": 4779,
+    "final_train": 0.15155658211467854,
+    "final_val": 0.15421838488181433,
+    "best_val": 0.1507910232345263,
+    "best_val_epoch": 6,
+    "conv_epoch": 3,
+    "diff_policy": "Diffusion Policy"
+  }
+}

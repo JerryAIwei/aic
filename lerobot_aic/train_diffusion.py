@@ -146,6 +146,7 @@ class DiffusionTrainer:
                 "observation.images.right_camera":  [0.0, -1 / FPS],
                 "action": [i / FPS for i in range(HORIZON)],
             },
+            video_backend="pyav",   # torchcodec needs libavutil.so.56/57; pyav uses system ffmpeg
         )
         n_total = len(self.full_ds)
         n_val   = max(1, int(0.15 * n_total))
@@ -220,18 +221,8 @@ class DiffusionTrainer:
                 for k, v in batch.items()}
 
     def _prep_batch(self, batch: dict) -> dict:
-        """
-        Normalise inputs and collapse obs time-dim for state/images.
-        Diffusion policy uses the *last* obs step as the conditioning frame.
-        The action tensor stays (B, horizon, 6).
-        """
-        batch = self.preprocessor(batch)
-        if "observation.state" in batch and batch["observation.state"].ndim == 3:
-            batch["observation.state"] = batch["observation.state"][:, -1, :]
-        for k in list(batch.keys()):
-            if k.startswith("observation.images.") and batch[k].ndim == 5:
-                batch[k] = batch[k][:, -1, ...]   # (B, n_obs, C, H, W) → (B, C, H, W)
-        return batch
+        """Normalise inputs. DiffusionPolicy expects (B, n_obs_steps, ...) for obs."""
+        return self.preprocessor(batch)
 
     # ── Epoch ─────────────────────────────────────────────────────────────────
 

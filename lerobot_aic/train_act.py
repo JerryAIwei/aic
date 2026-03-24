@@ -135,6 +135,7 @@ class ACTTrainer:
                 "observation.images.right_camera":    [0.0],
                 "action": [i / FPS for i in range(CHUNK_SIZE)],
             },
+            video_backend="pyav",   # torchcodec needs libavutil.so.56/57; pyav uses system ffmpeg
         )
         n_total = len(self.full_ds)
         n_val   = max(1, int(0.15 * n_total))
