@@ -25,8 +25,8 @@ AIC robot settings
 Dataset
 ───────
   local/aic_cable_insertion_large
-  500 train + 100 val episodes, 100 steps each → 60,000 frames
-  5 trajectory strategies for coverage
+  80 train + 20 val episodes, 100 steps each → 10,000 frames
+  5 trajectory strategies, 3 cameras stored as mp4 (use_videos=True)
 
 Usage
 ─────
@@ -311,7 +311,7 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Train Diffusion Policy on AIC cable-insertion dataset (lerobot)"
     )
-    p.add_argument("--steps",        type=int,   default=10000,
+    p.add_argument("--steps",        type=int,   default=5000,
                    help="Total training gradient steps")
     p.add_argument("--batch_size",   type=int,   default=8)
     p.add_argument("--lr",           type=float, default=1e-4)
