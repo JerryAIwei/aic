@@ -1,0 +1,37 @@
+{
+  "model": {
+    "policy": "Diffusion Policy (lerobot)",
+    "reference": "https://github.com/huggingface/lerobot",
+    "backbone": "ResNet-18 \u00d7 3 cameras",
+    "unet_dims": [
+      256,
+      512,
+      1024
+    ],
+    "n_obs_steps": 2,
+    "horizon": 16,
+    "n_action_steps": 8,
+    "noise_scheduler": "DDPM",
+    "num_train_timesteps": 100,
+    "n_params": 80435750
+  },
+  "training": {
+    "steps": 5000,
+    "batch_size": 16,
+    "lr": 0.0001,
+    "weight_decay": 1e-06,
+    "save_every": 5,
+    "repo_id": "local/aic_cable_insertion_sim",
+    "run_name": "aic_cable_insertion_sim"
+  },
+  "dataset": {
+    "repo_id": "local/aic_cable_insertion_sim",
+    "n_train": 9010,
+    "n_val": 1590,
+    "cameras": [
+      "center_camera",
+      "left_camera",
+      "right_camera"
+    ]
+  }
+}
