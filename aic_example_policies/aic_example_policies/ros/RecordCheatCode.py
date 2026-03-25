@@ -39,8 +39,10 @@ IMG_H, IMG_W = 128, 144
 SAVE_DIR = Path("/tmp/aic_recordings")
 
 
-def _ros_img_to_numpy(img_msg) -> np.ndarray:
-    """Convert sensor_msgs/Image → (IMG_H, IMG_W, 3) uint8 RGB numpy array."""
+def _ros_img_to_numpy(img_msg) -> np.ndarray | None:
+    """Convert sensor_msgs/Image → (IMG_H, IMG_W, 3) uint8 RGB array, or None if empty."""
+    if not img_msg.data or img_msg.height == 0 or img_msg.width == 0:
+        return None
     arr = np.frombuffer(img_msg.data, dtype=np.uint8).reshape(
         img_msg.height, img_msg.width, 3
     )
@@ -84,14 +86,20 @@ class RecordCheatCode(CheatCode):
 
     # ── recording helpers ────────────────────────────────────────────────────
 
-    def _record(self, get_observation, states, actions, imgs_c, imgs_l, imgs_r):
-        """Call get_observation() once and append to episode buffers."""
+    def _record(self, get_observation, states, actions, imgs_c, imgs_l, imgs_r) -> bool:
+        """Call get_observation() once, append to buffers. Returns False if images empty."""
         obs = get_observation()
+        c = _ros_img_to_numpy(obs.center_image)
+        l = _ros_img_to_numpy(obs.left_image)
+        r = _ros_img_to_numpy(obs.right_image)
+        if c is None or l is None or r is None:
+            return False   # camera not yet streaming — skip this step
         states.append(_extract_state(obs))
         actions.append(_extract_action(obs))
-        imgs_c.append(_ros_img_to_numpy(obs.center_image))
-        imgs_l.append(_ros_img_to_numpy(obs.left_image))
-        imgs_r.append(_ros_img_to_numpy(obs.right_image))
+        imgs_c.append(c)
+        imgs_l.append(l)
+        imgs_r.append(r)
+        return True
 
     def _save_episode(self, states, actions, imgs_c, imgs_l, imgs_r) -> Path:
         """Compress and save episode arrays; write path to latest.txt."""
@@ -129,7 +137,7 @@ class RecordCheatCode(CheatCode):
         cable_tip_frame = f"{task.cable_name}/{task.plug_name}_link"
 
         for frame in [port_frame, cable_tip_frame]:
-            if not self._wait_for_tf("base_link", frame):
+            if not self._wait_for_tf("base_link", frame, timeout_sec=60.0):
                 return False
 
         try:

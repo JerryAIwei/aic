@@ -21,6 +21,7 @@ Policy parameter for aic_model:
 """
 
 import collections
+import os
 from pathlib import Path
 
 import cv2
@@ -40,8 +41,13 @@ from geometry_msgs.msg import Point, Pose, Quaternion, Vector3, Wrench
 from std_msgs.msg import Header
 
 # ── checkpoint location ───────────────────────────────────────────────────────
-_HERE = Path(__file__).resolve().parent.parent.parent.parent.parent  # workspace/aic
-CKPT_DIR = _HERE / "lerobot_aic" / "checkpoints_diffusion_aic_cable_insertion_sim" / "best_model"
+# Allow override via environment variable; default to the workspace path
+CKPT_DIR = Path(
+    os.environ.get(
+        "AIC_DIFFUSION_CKPT",
+        "/workspace/aic/lerobot_aic/checkpoints_diffusion_aic_cable_insertion_sim/best_model",
+    )
+)
 
 IMG_H, IMG_W = 128, 144   # must match recording resolution
 N_OBS   = 2

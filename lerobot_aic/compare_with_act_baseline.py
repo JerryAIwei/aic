@@ -101,8 +101,8 @@ def _ros_env() -> dict:
     env["ZENOH_CONFIG_OVERRIDE"] = "transport/shared_memory/enabled=false"
     env["OGRE2_RESOURCE_PATH"] = "/usr/lib/x86_64-linux-gnu/OGRE-2.3/OGRE"
     env.pop("DISPLAY", None)
-    ws_policies = str(WORKSPACE / "aic_example_policies")
-    env["PYTHONPATH"] = f"{ws_policies}:{env.get('PYTHONPATH', '')}"
+    rootfs_py = f"{ROOTFS}/usr/lib/python3/dist-packages:{ROOTFS}/usr/lib/python3.12/dist-packages"
+    env["PYTHONPATH"] = f"{rootfs_py}:{env.get('PYTHONPATH', '')}"
     return env
 
 
@@ -234,7 +234,7 @@ def main():
         print("(This launches Gazebo — ensure GPU/display environment is correct)")
 
         run_eval(
-            policy="aic_example_policies.ros.RunSimDiffusion.RunSimDiffusion",
+            policy="aic_example_policies.ros.RunSimDiffusion",
             results_subdir="sim_diffusion_eval",
             timeout=args.timeout,
         )

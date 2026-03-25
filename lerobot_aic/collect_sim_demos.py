@@ -3,11 +3,12 @@ collect_sim_demos.py
 Collect imitation-learning demonstrations from the AIC Gazebo simulation.
 
 For each scenario:
-  1. Launch Zenoh router
-  2. Launch aic_model with RecordCheatCode (records obs + actions to /tmp/aic_recordings/)
-  3. Launch simulation with ground_truth:=true + aic_engine (exits after one insertion)
-  4. Read the saved .npz episode file
-  5. Add the episode to a LeRobot dataset
+  1. Generate a single-trial aic_engine config with the scenario's board/cable poses
+  2. Launch Zenoh router
+  3. Launch aic_model with RecordCheatCode (records obs + actions to /tmp/aic_recordings/)
+  4. Launch simulation with ground_truth:=true + aic_engine (exits after one insertion)
+  5. Read the saved .npz episode file
+  6. Add the episode to a LeRobot dataset
 
 Diversity is achieved by perturbing:
   - task_board_x/y     ± 2 cm
@@ -21,6 +22,7 @@ Usage:
 import argparse
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -33,6 +35,7 @@ ROOTFS = "/opt/aic_rootfs"
 ROS_SETUP = "/ws_aic/install/setup.bash"
 WORKSPACE = Path("/workspace/aic")
 SAVE_DIR = Path("/tmp/aic_recordings")
+CONFIG_DIR = Path("/tmp/aic_configs")
 
 IMG_H, IMG_W = 128, 144
 STATE_DIM, ACTION_DIM = 26, 6
@@ -40,7 +43,7 @@ FPS = 20
 
 REPO_ID_DEFAULT = "local/aic_cable_insertion_sim"
 
-# Default poses from sample_config.yaml / launch defaults
+# Default poses matching sample_config.yaml
 _CABLE = dict(roll=0.4432, pitch=-0.4838, yaw=1.3303)
 _BOARD = dict(x=0.15, y=-0.2, z=1.14, yaw=3.1415)
 
@@ -64,6 +67,163 @@ def gen_scenarios(n: int, seed: int = 42) -> list[dict]:
     return out
 
 
+def write_trial_config(scenario: dict, path: Path) -> None:
+    """Write a single-trial aic_engine config with the scenario's board and cable poses."""
+    sc = scenario
+    yaml = f"""# Auto-generated single-trial config for demo collection
+scoring:
+  topics:
+    - topic:
+        name: "/joint_states"
+        type: "sensor_msgs/msg/JointState"
+    - topic:
+        name: "/tf"
+        type: "tf2_msgs/msg/TFMessage"
+    - topic:
+        name: "/tf_static"
+        type: "tf2_msgs/msg/TFMessage"
+        latched: true
+    - topic:
+        name: "/scoring/tf"
+        type: "tf2_msgs/msg/TFMessage"
+    - topic:
+        name: "/aic/gazebo/contacts/off_limit"
+        type: "ros_gz_interfaces/msg/Contacts"
+    - topic:
+        name: "/fts_broadcaster/wrench"
+        type: "geometry_msgs/msg/WrenchStamped"
+    - topic:
+        name: "/aic_controller/joint_commands"
+        type: "aic_control_interfaces/msg/JointMotionUpdate"
+    - topic:
+        name: "/aic_controller/pose_commands"
+        type: "aic_control_interfaces/msg/MotionUpdate"
+    - topic:
+        name: "/scoring/insertion_event"
+        type: "std_msgs/msg/String"
+    - topic:
+        name: "/aic_controller/controller_state"
+        type: "aic_control_interfaces/msg/ControllerState"
+
+task_board_limits:
+  nic_rail:
+    min_translation: -0.0215
+    max_translation: 0.0234
+  sc_rail:
+    min_translation: -0.06
+    max_translation: 0.055
+  mount_rail:
+    min_translation: -0.09425
+    max_translation: 0.09425
+
+trials:
+  trial_1:
+    scene:
+        task_board:
+          pose:
+            x: {sc['task_board_x']}
+            y: {sc['task_board_y']}
+            z: {sc['task_board_z']}
+            roll: 0.0
+            pitch: 0.0
+            yaw: {sc['task_board_yaw']}
+          nic_rail_0:
+            entity_present: True
+            entity_name: "nic_card_0"
+            entity_pose:
+              translation: 0.036
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
+          nic_rail_1:
+            entity_present: False
+          nic_rail_2:
+            entity_present: False
+          nic_rail_3:
+            entity_present: False
+          nic_rail_4:
+            entity_present: False
+          sc_rail_0:
+            entity_present: True
+            entity_name: "sc_mount_0"
+            entity_pose:
+              translation: 0.042
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.1
+          sc_rail_1:
+            entity_present: False
+          lc_mount_rail_0:
+            entity_present: True
+            entity_name: "lc_mount_0"
+            entity_pose:
+              translation: 0.02
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
+          sfp_mount_rail_0:
+            entity_present: True
+            entity_name: "sfp_mount_0"
+            entity_pose:
+              translation: 0.03
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
+          sc_mount_rail_0:
+            entity_present: True
+            entity_name: "sc_mount_0"
+            entity_pose:
+              translation: -0.02
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
+          lc_mount_rail_1:
+            entity_present: True
+            entity_name: "lc_mount_1"
+            entity_pose:
+              translation: -0.01
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
+          sfp_mount_rail_1:
+            entity_present: False
+          sc_mount_rail_1:
+            entity_present: False
+        cables:
+          cable_0:
+            pose:
+              gripper_offset:
+                x: 0.0
+                y: 0.015385
+                z: 0.04245
+              roll: {sc['cable_roll']}
+              pitch: {sc['cable_pitch']}
+              yaw: {sc['cable_yaw']}
+            attach_cable_to_gripper: True
+            cable_type: "sfp_sc_cable"
+    tasks:
+      task_1:
+        cable_type: "sfp_sc"
+        cable_name: "cable_0"
+        plug_type: "sfp"
+        plug_name: "sfp_tip"
+        port_type: "sfp"
+        port_name: "sfp_port_0"
+        target_module_name: "nic_card_mount_0"
+        time_limit: 240
+
+robot:
+  home_joint_positions:
+    shoulder_pan_joint: -0.1597
+    shoulder_lift_joint: -1.3542
+    elbow_joint: -1.6648
+    wrist_1_joint: -1.6933
+    wrist_2_joint: 1.5710
+    wrist_3_joint: 1.4110
+"""
+    path.write_text(yaml)
+
+
 # ── environment helpers ───────────────────────────────────────────────────────
 
 def _ros_env() -> dict:
@@ -84,20 +244,45 @@ def _ros_env() -> dict:
     env["ZENOH_CONFIG_OVERRIDE"] = "transport/shared_memory/enabled=false"
     env["OGRE2_RESOURCE_PATH"] = "/usr/lib/x86_64-linux-gnu/OGRE-2.3/OGRE"
     env.pop("DISPLAY", None)   # headless
-    # Make workspace's aic_example_policies importable (for RecordCheatCode)
-    ws_policies = str(WORKSPACE / "aic_example_policies")
-    env["PYTHONPATH"] = f"{ws_policies}:{env.get('PYTHONPATH', '')}"
+    # rootfs dist-packages provide transforms3d and other ROS Python deps
+    rootfs_py = f"{ROOTFS}/usr/lib/python3/dist-packages:{ROOTFS}/usr/lib/python3.12/dist-packages"
+    env["PYTHONPATH"] = f"{rootfs_py}:{env.get('PYTHONPATH', '')}"
     return env
 
 
 def _popen(cmd: str, log: Path | None = None, env: dict | None = None) -> subprocess.Popen:
-    """Popen a bash -c command, optionally teeing to log file."""
+    """Popen a bash -c command in its own process group, optionally teeing to log file."""
     if log:
         cmd = f"({cmd}) 2>&1 | tee {log}"
     return subprocess.Popen(
         ["bash", "-c", f". {ROS_SETUP} && {cmd}"],
         env=env or _ros_env(),
+        start_new_session=True,   # new process group → kill whole tree with os.killpg
     )
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    """Kill the entire process group spawned by proc."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
+def _cleanup_stale_nodes() -> None:
+    """Kill any lingering aic_model / zenoh / gazebo processes from prior runs."""
+    for pattern in ["aic_model", "rmw_zenohd", "gz_server", "gzserver"]:
+        subprocess.run(["pkill", "-9", "-f", pattern],
+                       capture_output=True)
+    time.sleep(2)
 
 
 # ── episode runner ────────────────────────────────────────────────────────────
@@ -120,16 +305,24 @@ def _wait_for_episode(timeout: int = 200) -> Path | None:
 def run_episode(scenario: dict, ep_idx: int) -> Path | None:
     """
     Spin up one simulation episode:
-      1. Zenoh router
-      2. RecordCheatCode policy
-      3. Simulation + aic_engine (exits after insertion)
+      1. Write per-scenario aic_engine config (single trial with varied scene)
+      2. Zenoh router
+      3. RecordCheatCode policy
+      4. Simulation + aic_engine (exits after insertion)
     Returns path to the saved .npz episode, or None on timeout/failure.
     """
+    _cleanup_stale_nodes()
+
     env = _ros_env()
     log_dir = Path("/tmp/aic_logs")
     log_dir.mkdir(exist_ok=True)
+    CONFIG_DIR.mkdir(exist_ok=True)
 
-    # 1. Zenoh router
+    # 1. Per-scenario engine config
+    cfg_path = CONFIG_DIR / f"trial_{ep_idx}.yaml"
+    write_trial_config(scenario, cfg_path)
+
+    # 2. Zenoh router
     zenoh = _popen(
         "ros2 run rmw_zenoh_cpp rmw_zenohd",
         log=log_dir / f"zenoh_{ep_idx}.log",
@@ -137,47 +330,35 @@ def run_episode(scenario: dict, ep_idx: int) -> Path | None:
     )
     time.sleep(3)
 
-    # 2. Policy node (waits for engine to send InsertCable goal)
+    # 3. Policy node (waits for engine to send InsertCable goal)
     policy = _popen(
         "ros2 run aic_model aic_model "
         "--ros-args -p use_sim_time:=true "
-        "-p policy:=aic_example_policies.ros.RecordCheatCode.RecordCheatCode",
+        "-p policy:=aic_example_policies.ros.RecordCheatCode",
         log=log_dir / f"policy_{ep_idx}.log",
         env=env,
     )
     time.sleep(2)
 
-    # 3. Simulation + engine
-    sc = scenario
+    # 4. Simulation + engine (single-trial config, ground truth mode)
     sim_cmd = (
         "ros2 launch aic_bringup aic_gz_bringup.launch.py "
         "gazebo_gui:=false "
         "ground_truth:=true "
-        "spawn_task_board:=true "
+        "spawn_task_board:=false "   # engine handles board spawning via config
         "start_aic_engine:=true "
         "shutdown_on_aic_engine_exit:=true "
-        "attach_cable_to_gripper:=true "
-        f"task_board_x:={sc['task_board_x']} "
-        f"task_board_y:={sc['task_board_y']} "
-        f"task_board_z:={sc['task_board_z']} "
-        f"task_board_yaw:={sc['task_board_yaw']} "
-        f"cable_roll:={sc['cable_roll']} "
-        f"cable_pitch:={sc['cable_pitch']} "
-        f"cable_yaw:={sc['cable_yaw']}"
+        f"aic_engine_config_file:={cfg_path}"
     )
     sim = _popen(sim_cmd, log=log_dir / f"sim_{ep_idx}.log", env=env)
 
-    # Wait for sim startup then poll for episode completion
-    time.sleep(20)
-    ep_path = _wait_for_episode(timeout=180)
+    # Wait for Gazebo + TF relay + engine to fully start
+    time.sleep(40)
+    ep_path = _wait_for_episode(timeout=200)
 
-    # Teardown
+    # Teardown — kill entire process groups so no orphan ROS nodes remain
     for proc in [policy, sim, zenoh]:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _kill(proc)
     time.sleep(3)
 
     return ep_path
