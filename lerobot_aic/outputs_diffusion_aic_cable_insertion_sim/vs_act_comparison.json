@@ -2,10 +2,18 @@
   "sim_diffusion": {
     "best_val_loss": 0.023253136779527245,
     "best_val_epoch": 7,
-    "scoring": {}
+    "scoring": {
+      "success": true,
+      "time_s": null,
+      "max_force_N": null
+    }
   },
   "run_act_baseline": {
     "best_val_loss": 1.0692174005508424,
-    "scoring": {}
+    "scoring": {
+      "success": false,
+      "time_s": null,
+      "max_force_N": null
+    }
   }
 }
