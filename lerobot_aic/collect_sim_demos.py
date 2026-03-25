@@ -295,9 +295,11 @@ def _wait_for_episode(timeout: int = 200) -> Path | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if latest.exists():
-            ep_path = Path(latest.read_text().strip())
-            if ep_path.exists():
-                return ep_path
+            text = latest.read_text().strip()
+            if text:   # guard against empty file
+                ep_path = Path(text)
+                if ep_path.exists() and ep_path.is_file():
+                    return ep_path
         time.sleep(2)
     return None
 
@@ -435,13 +437,37 @@ def build_dataset(episodes: list[dict], repo_id: str) -> None:
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+def load_existing_npzs() -> list[dict]:
+    """Load all valid .npz episodes already in SAVE_DIR."""
+    episodes = []
+    for p in sorted(SAVE_DIR.glob("ep_*.npz")):
+        try:
+            d = np.load(str(p))
+            if "states" in d and len(d["states"]) > 0:
+                episodes.append({
+                    "states":  d["states"],
+                    "actions": d["actions"],
+                    "center":  d["center"],
+                    "left":    d["left"],
+                    "right":   d["right"],
+                })
+                print(f"  Loaded existing: {p.name}  ({len(d['states'])} steps)")
+        except Exception as e:
+            print(f"  WARNING: could not load {p.name}: {e}")
+    return episodes
+
+
 def main():
     p = argparse.ArgumentParser(description="Collect sim demos for imitation learning")
     p.add_argument("--n_episodes",   type=int, default=20,
-                   help="Number of demonstration episodes to collect")
+                   help="Total demonstration episodes (including resumed)")
     p.add_argument("--dataset_name", default=REPO_ID_DEFAULT,
                    help="LeRobot repo_id for the output dataset")
     p.add_argument("--seed",         type=int, default=42)
+    p.add_argument("--resume",       action="store_true",
+                   help="Load existing .npz files from SAVE_DIR before collecting more")
+    p.add_argument("--start_idx",    type=int, default=0,
+                   help="Skip the first N scenarios (use with --resume)")
     args = p.parse_args()
 
     scenarios = gen_scenarios(args.n_episodes, seed=args.seed)
@@ -450,14 +476,23 @@ def main():
 
     episode_data: list[dict] = []
 
+    # Optionally load existing episodes
+    if args.resume:
+        episode_data = load_existing_npzs()
+        print(f"Resumed with {len(episode_data)} existing episodes.\n")
+
     for i, sc in enumerate(scenarios):
-        print(f"[{i + 1}/{args.n_episodes}] board_x={sc['task_board_x']:.3f}  "
+        if i < args.start_idx:
+            continue   # skip already-collected scenarios
+
+        ep_num = i + 1
+        print(f"[{ep_num}/{args.n_episodes}] board_x={sc['task_board_x']:.3f}  "
               f"board_y={sc['task_board_y']:.3f}  "
               f"cable_roll={sc['cable_roll']:.3f}")
         ep_path = run_episode(sc, i)
 
         if ep_path is None:
-            print(f"  WARNING: episode {i + 1} timed out — skipping\n")
+            print(f"  WARNING: episode {ep_num} timed out — skipping\n")
             continue
 
         data = np.load(str(ep_path))
