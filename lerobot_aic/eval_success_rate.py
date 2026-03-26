@@ -92,9 +92,11 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 def _cleanup() -> None:
-    for pat in ["aic_model", "rmw_zenohd", "gz_server", "gzserver"]:
+    for pat in ["aic_model", "rmw_zenohd", "gz_server", "gzserver",
+                "component_container", "aic_engine", "aic_adapter",
+                "ros2 launch aic_bringup"]:
         subprocess.run(["pkill", "-9", "-f", pat], capture_output=True)
-    time.sleep(2)
+    time.sleep(4)
 
 
 # ── Scene config ──────────────────────────────────────────────────────────────
@@ -266,10 +268,8 @@ def _parse_trial(log_dir: Path) -> dict:
         except Exception:
             continue
 
-        # Insertion success — look for insertion event or success message
-        if (re.search(r"insertion.?success", text, re.IGNORECASE)
-                or re.search(r"cable.*inserted", text, re.IGNORECASE)
-                or "succeeded" in text.lower()):
+        # Insertion success — check aic_engine total score = 1 (definitive)
+        if re.search(r"total score is:\s*1\.0", text, re.IGNORECASE):
             result["success"] = True
 
         # Time to insertion (seconds after trial start)
@@ -301,7 +301,7 @@ def _parse_trial(log_dir: Path) -> dict:
 # ── One trial runner ──────────────────────────────────────────────────────────
 
 def run_trial(ckpt_path: str, scenario: dict, trial_id: str,
-              results_dir: Path, timeout: int = 180) -> dict:
+              results_dir: Path, timeout: int = 360) -> dict:
     _cleanup()
     CONFIG_DIR.mkdir(exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -317,14 +317,8 @@ def run_trial(ckpt_path: str, scenario: dict, trial_id: str,
                    log=log_dir / "zenoh.log", env=env)
     time.sleep(3)
 
-    policy = _popen(
-        "ros2 run aic_model aic_model "
-        "--ros-args -p use_sim_time:=true "
-        "-p policy:=aic_example_policies.ros.RunSimDiffusion.RunSimDiffusion",
-        log=log_dir / "policy.log", env=env,
-    )
-    time.sleep(2)
-
+    # Launch sim first so Gazebo and controller_manager are ready
+    # before aic_model tries to configure/activate.
     sim = _popen(
         "ros2 launch aic_bringup aic_gz_bringup.launch.py "
         "gazebo_gui:=false "
@@ -334,6 +328,15 @@ def run_trial(ckpt_path: str, scenario: dict, trial_id: str,
         "shutdown_on_aic_engine_exit:=true "
         f"aic_engine_config_file:={cfg_path}",
         log=log_dir / "sim.log", env=env,
+    )
+    # Wait for Gazebo/controller_manager to be ready before launching policy
+    time.sleep(15)
+
+    policy = _popen(
+        "ros2 run aic_model aic_model "
+        "--ros-args -p use_sim_time:=true "
+        "-p policy:=aic_example_policies.ros.RunSimDiffusion",
+        log=log_dir / "policy.log", env=env,
     )
 
     start = time.time()

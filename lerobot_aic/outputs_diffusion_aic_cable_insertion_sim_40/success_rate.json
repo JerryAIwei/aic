@@ -1,0 +1,84 @@
+{
+  "model_20ep_checkpoint": "lerobot_aic/checkpoints_diffusion_aic_cable_insertion_sim/best_model",
+  "model_40ep_checkpoint": "lerobot_aic/checkpoints_diffusion_aic_cable_insertion_sim_40/best_model",
+  "n_trials": 5,
+  "seed": 999,
+  "results": {
+    "model_20ep": [
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 241.9
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 249.4
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 240.5
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 255.5
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 255.4
+      }
+    ],
+    "model_40ep": [
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 241.5
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 235.5
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 238.6
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 240.6
+      },
+      {
+        "success": true,
+        "time_s": null,
+        "max_force_N": null,
+        "elapsed_total_s": 237.4
+      }
+    ],
+    "model_20ep_summary": {
+      "success_rate": 1.0,
+      "n_success": 5,
+      "n_trials": 5,
+      "mean_time_s": null
+    },
+    "model_40ep_summary": {
+      "success_rate": 1.0,
+      "n_success": 5,
+      "n_trials": 5,
+      "mean_time_s": null
+    }
+  }
+}

@@ -20,7 +20,6 @@ Policy parameter for aic_model:
   aic_example_policies.ros.RunSimDiffusion.RunSimDiffusion
 """
 
-import collections
 import os
 from pathlib import Path
 
@@ -101,35 +100,25 @@ class RunSimDiffusion(Policy):
         self.model.eval()
         self.model.to(self.device)
 
-        # Observation ring-buffer: deque of length N_OBS
-        self._obs_buf: collections.deque = collections.deque(maxlen=N_OBS)
-        # Action chunk buffer: remaining pre-planned actions
-        self._action_queue: collections.deque = collections.deque()
+
 
         n_params = sum(p.numel() for p in self.model.parameters())
         self.get_logger().info(f"DiffusionPolicy loaded on {self.device}  ({n_params:,} params)")
 
     # ── observation preprocessing ─────────────────────────────────────────────
 
-    def _preprocess_obs(self, obs_list: list) -> dict:
-        """Stack N_OBS observations into model input tensors (on device)."""
-        assert len(obs_list) == N_OBS
+    def _preprocess_obs(self, obs) -> dict:
+        """Convert a single observation into model input tensors (on device).
 
-        # Images: (1, N_OBS, 3, H, W)
-        def stack_imgs(key):
-            frames = [_ros_img_to_tensor(getattr(o, key), self.device) for o in obs_list]
-            return torch.stack(frames, dim=1)   # (1, N_OBS, 3, H, W)
-
-        # State: (1, N_OBS, 26)
-        states = torch.stack(
-            [_obs_to_state_tensor(o, self.device) for o in obs_list], dim=1
-        )  # (1, N_OBS, 26)
-
+        select_action() manages its own obs history queue internally, so we
+        provide single-timestep tensors: (1, C, H, W) for images, (1, 26)
+        for state.  select_action() stacks them into (B, n_obs, ...) internally.
+        """
         return {
-            "observation.state":                   states,
-            "observation.images.center_camera":    stack_imgs("center_image"),
-            "observation.images.left_camera":      stack_imgs("left_image"),
-            "observation.images.right_camera":     stack_imgs("right_image"),
+            "observation.state":                   _obs_to_state_tensor(obs, self.device),
+            "observation.images.center_camera":    _ros_img_to_tensor(obs.center_image, self.device),
+            "observation.images.left_camera":      _ros_img_to_tensor(obs.left_image, self.device),
+            "observation.images.right_camera":     _ros_img_to_tensor(obs.right_image, self.device),
         }
 
     # ── action execution ──────────────────────────────────────────────────────
@@ -159,37 +148,21 @@ class RunSimDiffusion(Policy):
         send_feedback: SendFeedbackCallback,
     ) -> bool:
         self.get_logger().info("RunSimDiffusion.insert_cable() start")
-        self._obs_buf.clear()
-        self._action_queue.clear()
-        self.model.reset()
+        self.model.reset()   # clear model's internal obs/action queues
 
         max_steps = 600     # 30 s at 20 Hz
         send_feedback("RunSimDiffusion: running diffusion policy")
 
         for step in range(max_steps):
             obs = get_observation()
-            self._obs_buf.append(obs)
 
-            # Pad buffer to N_OBS by repeating first observation
-            obs_list = list(self._obs_buf)
-            while len(obs_list) < N_OBS:
-                obs_list.insert(0, obs_list[0])
-
-            # Re-plan when action queue is empty
-            if not self._action_queue:
-                batch = self._preprocess_obs(obs_list)
-                with torch.no_grad():
-                    actions = self.model.select_action(batch)
-                # actions: (1, n_action_steps, 6) or (n_action_steps, 6)
-                if actions.dim() == 3:
-                    actions = actions[0]   # (n_action_steps, 6)
-                for a in actions.cpu().numpy():
-                    self._action_queue.append(a)
-                self.get_logger().info(
-                    f"step {step}: re-planned {len(actions)} actions"
-                )
-
-            action = self._action_queue.popleft()   # (6,)
+            # select_action() handles obs history and action chunk caching
+            # internally; pass a single-timestep batch each control step.
+            batch = self._preprocess_obs(obs)
+            with torch.no_grad():
+                action = self.model.select_action(batch)
+            # action: (1, 6) or (6,) — just the next action
+            action = action.squeeze().cpu().numpy()   # (6,)
 
             # Convert velocity → pose target (integrate current TCP pose + delta)
             cs = obs.controller_state

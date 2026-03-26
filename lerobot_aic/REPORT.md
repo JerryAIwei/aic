@@ -263,30 +263,93 @@ bash lerobot_aic/run_pipeline.sh
 
 ---
 
-## 8. Files
+## 8. Dataset Scaling: 20-ep → 40-ep
+
+### Additional Data Collection
+
+20 additional episodes were collected with seed=100 (episodes 21–40), using the same per-episode randomisation scheme as episodes 11–20 (±2 cm board, ±0.05 rad yaw, ±0.03 rad cable roll/pitch/yaw). The combined 40-episode dataset has **21,200 frames**.
+
+### 40-ep Training
+
+The 40-episode dataset was trained for **8000 steps** (7 epochs, ~1,126 steps/epoch):
+
+![Comparative training curves](report_assets/fig8_comparative_training.png)
+
+| Epoch | LR | Train Loss | Val Loss | Best |
+|---|---|---|---|---|
+| 1 | 9.52e-5 | 0.09660 | 0.03544 | |
+| 2 | 8.19e-5 | 0.03166 | 0.02651 | |
+| 3 | 6.25e-5 | 0.02725 | 0.02594 | |
+| 4 | 4.08e-5 | 0.02298 | 0.02205 | |
+| 5 | 2.09e-5 | 0.02221 | 0.02062 | |
+| 6 | 6.79e-6 | 0.02076 | 0.01972 | |
+| **7** | **1.05e-6** | **0.01931** | **0.01736** | **✓ Best** |
+
+Best checkpoint: `checkpoints_diffusion_aic_cable_insertion_sim_40/best_model/`
+
+### Validation Loss Comparison
+
+![Val loss 40ep comparison](report_assets/fig9_val_loss_comparison_40ep.png)
+
+| Model | Episodes | Steps | Best Val Loss | Δ vs 20-ep |
+|---|---|---|---|---|
+| **20-ep model** | 20 | 5000 | 0.02325 | — |
+| **40-ep model** | 40 | 8000 | **0.01736** | **−25.3%** |
+
+Doubling the dataset size reduced validation loss by **25.3%**.
+
+### Success Rate Evaluation
+
+Both checkpoints were evaluated over **5 randomised trials each** (seed=999, board ±1.5 cm, cable ±2.5°, `ground_truth:=false`):
+
+![Success rate comparison](report_assets/fig10_success_rate_comparison.png)
+
+| Metric | 20-ep model | 40-ep model |
+|---|---|---|
+| **Success rate** | **5/5 (100%)** | **5/5 (100%)** |
+| AIC engine total score | 1.000 (all trials) | 1.000 (all trials) |
+| Mean trial wall time | ~247 s | ~241 s |
+
+Both models achieve **100% cable insertion success** across all randomised scenes. The 40-ep model converges to lower validation loss (25% improvement) while maintaining perfect success rate, suggesting better generalisation to unseen pose variations.
+
+---
+
+## 9. Files
 
 ```
 lerobot_aic/
   collect_sim_demos.py                        Data collection orchestrator
   train_diffusion.py                          Diffusion policy trainer
+  eval_success_rate.py                        Multi-trial success rate evaluation
   compare_with_act_baseline.py                Metrics + scoring comparison
-  run_pipeline.sh                             End-to-end pipeline script
+  run_pipeline.sh                             End-to-end 20-ep pipeline
+  run_double_pipeline.sh                      40-ep doubling pipeline
   single_trial_config.yaml                    Per-episode engine config template
-  checkpoints_diffusion_aic_cable_insertion_sim/best_model/   Trained checkpoint
+
+  checkpoints_diffusion_aic_cable_insertion_sim/best_model/      20-ep checkpoint
+  checkpoints_diffusion_aic_cable_insertion_sim_40/best_model/   40-ep checkpoint
+
   outputs_diffusion_aic_cable_insertion_sim/
-    metrics.json                              Full training history
-    run_config.json                           Training hyperparameters
-    vs_act_comparison.json                    Final comparison results
+    metrics.json                              20-ep training history
+    vs_act_comparison.json                    20-ep comparison results
+  outputs_diffusion_aic_cable_insertion_sim_40/
+    metrics.json                              40-ep training history
+    success_rate.json                         5-trial success rate comparison
+    eval_trials/                              Per-trial sim/policy logs
+
   report_assets/
-    fig1_training_curves.png
-    fig2_val_loss_comparison.png
-    fig3_camera_observations.png
-    fig4_state_trajectory.png
-    fig5_action_trajectory.png
-    fig6_dataset_stats.png
-    fig7_scoring_comparison.png
+    fig1_training_curves.png                  20-ep training (vs synthetic)
+    fig2_val_loss_comparison.png              20-ep val loss bar chart
+    fig3_camera_observations.png              3-camera sample frames
+    fig4_state_trajectory.png                 Full episode state trajectory
+    fig5_action_trajectory.png                Action (velocity) trajectory
+    fig6_dataset_stats.png                    Dataset statistics
+    fig7_scoring_comparison.png               Live AIC score (20-ep vs RunACT)
+    fig8_comparative_training.png             20-ep vs 40-ep training curves
+    fig9_val_loss_comparison_40ep.png         Val loss bar chart (both models)
+    fig10_success_rate_comparison.png         Success rate (5 trials each)
 
 aic_example_policies/aic_example_policies/ros/
   RecordCheatCode.py                          Demonstration recorder
-  RunSimDiffusion.py                          Inference policy
+  RunSimDiffusion.py                          Inference policy (fixed obs API)
 ```
