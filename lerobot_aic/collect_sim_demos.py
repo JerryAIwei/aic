@@ -1,8 +1,19 @@
 """
 collect_sim_demos.py
-Collect imitation-learning demonstrations from the AIC Gazebo simulation.
+Collect imitation-learning demonstrations from the AIC Gazebo simulation,
+or build a LeRobot dataset from pre-collected .npz episode files.
 
-For each scenario:
+Modes
+─────
+  collect (default):
+    Run the Gazebo simulation to record episodes, then build dataset.
+    Requires ROS2 + AIC rootfs environment.
+
+  build-only (--build_only):
+    Build a LeRobot dataset from existing .npz files — no simulation needed.
+    Use this locally after copying recorded episodes from a Docker session.
+
+For each simulation scenario:
   1. Generate a single-trial aic_engine config with the scenario's board/cable poses
   2. Launch Zenoh router
   3. Launch aic_model with RecordCheatCode (records obs + actions to /tmp/aic_recordings/)
@@ -15,8 +26,19 @@ Diversity is achieved by perturbing:
   - task_board_yaw     ± 0.05 rad
   - cable_roll/pitch/yaw  ± 0.03 rad
 
-Usage:
-    python collect_sim_demos.py [--n_episodes 20] [--dataset_name local/aic_cable_insertion_sim]
+Usage
+─────
+  # Collect from simulation (requires Docker/rootfs environment):
+  python collect_sim_demos.py --n_episodes 20 --dataset_name local/aic_cable_insertion_sim
+
+  # Build dataset from pre-collected .npz files (works locally):
+  python collect_sim_demos.py --build_only --data_dir /path/to/npz/files
+
+  # Build with quality filtering:
+  python collect_sim_demos.py --build_only --data_dir ./recordings --min_steps 30 --max_steps 1000
+
+  # Build with image storage instead of video (faster for small datasets):
+  python collect_sim_demos.py --build_only --no_video --data_dir ./recordings
 """
 
 import argparse
@@ -368,9 +390,14 @@ def run_episode(scenario: dict, ep_idx: int) -> Path | None:
 
 # ── LeRobot dataset builder ───────────────────────────────────────────────────
 
-def build_dataset(episodes: list[dict], repo_id: str) -> None:
+def build_dataset(episodes: list[dict], repo_id: str, use_videos: bool = True) -> None:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     from lerobot.utils.constants import HF_LEROBOT_HOME
+
+    # Determine which cameras are available from the first episode
+    has_left = "left" in episodes[0] and episodes[0]["left"] is not None
+    has_right = "right" in episodes[0] and episodes[0]["right"] is not None
+    img_dtype = "video" if use_videos else "image"
 
     features = {
         "observation.state": {
@@ -390,15 +417,7 @@ def build_dataset(episodes: list[dict], repo_id: str) -> None:
             ],
         },
         "observation.images.center_camera": {
-            "dtype": "video", "shape": (IMG_H, IMG_W, 3),
-            "names": ["height", "width", "channel"],
-        },
-        "observation.images.left_camera": {
-            "dtype": "video", "shape": (IMG_H, IMG_W, 3),
-            "names": ["height", "width", "channel"],
-        },
-        "observation.images.right_camera": {
-            "dtype": "video", "shape": (IMG_H, IMG_W, 3),
+            "dtype": img_dtype, "shape": (IMG_H, IMG_W, 3),
             "names": ["height", "width", "channel"],
         },
         "action": {
@@ -407,6 +426,16 @@ def build_dataset(episodes: list[dict], repo_id: str) -> None:
                       "angular.x", "angular.y", "angular.z"],
         },
     }
+    if has_left:
+        features["observation.images.left_camera"] = {
+            "dtype": img_dtype, "shape": (IMG_H, IMG_W, 3),
+            "names": ["height", "width", "channel"],
+        }
+    if has_right:
+        features["observation.images.right_camera"] = {
+            "dtype": img_dtype, "shape": (IMG_H, IMG_W, 3),
+            "names": ["height", "width", "channel"],
+        }
 
     root = HF_LEROBOT_HOME / repo_id
     if root.exists():
@@ -415,61 +444,203 @@ def build_dataset(episodes: list[dict], repo_id: str) -> None:
 
     ds = LeRobotDataset.create(
         repo_id=repo_id, fps=FPS, features=features,
-        robot_type="ur5e_aic", use_videos=True,
+        robot_type="ur5e_aic", use_videos=use_videos,
     )
 
+    total_frames = 0
     for i, ep in enumerate(episodes):
         T = len(ep["states"])
         for t in range(T):
-            ds.add_frame({
+            frame = {
                 "observation.state":                  ep["states"][t],
                 "observation.images.center_camera":   ep["center"][t],
-                "observation.images.left_camera":     ep["left"][t],
-                "observation.images.right_camera":    ep["right"][t],
                 "action":                             ep["actions"][t],
                 "task":                               "cable_insertion_sim",
-            })
+            }
+            if has_left:
+                frame["observation.images.left_camera"] = ep["left"][t]
+            if has_right:
+                frame["observation.images.right_camera"] = ep["right"][t]
+            ds.add_frame(frame)
         ds.save_episode()
+        total_frames += T
         print(f"  episode {i + 1}/{len(episodes)}: {T} steps")
 
-    print(f"\nDataset: {root}  ({len(ds):,} frames total)")
+    cameras = ["center"]
+    if has_left:
+        cameras.append("left")
+    if has_right:
+        cameras.append("right")
+    print(f"\nDataset: {root}")
+    print(f"  Episodes : {len(episodes)}")
+    print(f"  Frames   : {total_frames:,}")
+    print(f"  Cameras  : {', '.join(cameras)}")
+    print(f"  Storage  : {'video (mp4)' if use_videos else 'images (png)'}")
+    print(f"  State dim: {STATE_DIM}  |  Action dim: {ACTION_DIM}  |  FPS: {FPS}")
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-def load_existing_npzs() -> list[dict]:
-    """Load all valid .npz episodes already in SAVE_DIR."""
+def load_existing_npzs(data_dir: Path, min_steps: int = 1, max_steps: int = 0) -> list[dict]:
+    """Load all valid .npz episodes from a directory.
+
+    Args:
+        data_dir: Directory containing ep_*.npz files.
+        min_steps: Skip episodes shorter than this (default: 1 = keep all).
+        max_steps: Truncate episodes longer than this (0 = no limit).
+
+    Returns:
+        List of episode dicts with keys: states, actions, center, [left, right].
+    """
     episodes = []
-    for p in sorted(SAVE_DIR.glob("ep_*.npz")):
+    npz_files = sorted(data_dir.glob("ep_*.npz"))
+    if not npz_files:
+        # Also try *.npz as fallback pattern
+        npz_files = sorted(data_dir.glob("*.npz"))
+    if not npz_files:
+        print(f"  WARNING: no .npz files found in {data_dir}")
+        return episodes
+
+    skipped = 0
+    for p in npz_files:
         try:
-            d = np.load(str(p))
-            if "states" in d and len(d["states"]) > 0:
-                episodes.append({
-                    "states":  d["states"],
-                    "actions": d["actions"],
-                    "center":  d["center"],
-                    "left":    d["left"],
-                    "right":   d["right"],
-                })
-                print(f"  Loaded existing: {p.name}  ({len(d['states'])} steps)")
+            d = np.load(str(p), allow_pickle=False)
+            if "states" not in d or len(d["states"]) == 0:
+                print(f"  WARNING: {p.name} has no states — skipping")
+                skipped += 1
+                continue
+            T = len(d["states"])
+            if T < min_steps:
+                print(f"  WARNING: {p.name} too short ({T} < {min_steps} steps) — skipping")
+                skipped += 1
+                continue
+
+            end = min(T, max_steps) if max_steps > 0 else T
+            ep = {
+                "states":  d["states"][:end],
+                "actions": d["actions"][:end],
+                "center":  d["center"][:end],
+            }
+            # Left/right cameras are optional (single-camera setups)
+            if "left" in d:
+                ep["left"] = d["left"][:end]
+            else:
+                ep["left"] = None
+            if "right" in d:
+                ep["right"] = d["right"][:end]
+            else:
+                ep["right"] = None
+
+            episodes.append(ep)
+            n_steps = len(ep["states"])
+            cams = 1 + (1 if ep["left"] is not None else 0) + (1 if ep["right"] is not None else 0)
+            print(f"  Loaded: {p.name}  ({n_steps} steps, {cams} cameras)")
         except Exception as e:
             print(f"  WARNING: could not load {p.name}: {e}")
+            skipped += 1
+
+    if skipped:
+        print(f"  Skipped {skipped} files.")
     return episodes
 
 
+def print_episode_stats(episodes: list[dict]) -> None:
+    """Print summary statistics for loaded episodes."""
+    if not episodes:
+        print("No episodes to summarize.")
+        return
+    lengths = [len(ep["states"]) for ep in episodes]
+    total_frames = sum(lengths)
+    has_left = any(ep.get("left") is not None for ep in episodes)
+    has_right = any(ep.get("right") is not None for ep in episodes)
+    n_cameras = 1 + int(has_left) + int(has_right)
+
+    print(f"\n{'─' * 50}")
+    print(f"Episode Summary")
+    print(f"{'─' * 50}")
+    print(f"  Episodes     : {len(episodes)}")
+    print(f"  Total frames : {total_frames:,}")
+    print(f"  Steps/ep     : min={min(lengths)}, max={max(lengths)}, avg={sum(lengths)/len(lengths):.0f}")
+    print(f"  Cameras      : {n_cameras}")
+    print(f"  State dim    : {episodes[0]['states'].shape[1] if len(episodes[0]['states'].shape) > 1 else 'N/A'}")
+    print(f"  Action dim   : {episodes[0]['actions'].shape[1] if len(episodes[0]['actions'].shape) > 1 else 'N/A'}")
+    if len(episodes[0]['center'].shape) >= 3:
+        h, w = episodes[0]['center'].shape[1], episodes[0]['center'].shape[2]
+        print(f"  Image size   : {h}×{w}")
+    print(f"{'─' * 50}\n")
+
+
 def main():
-    p = argparse.ArgumentParser(description="Collect sim demos for imitation learning")
+    p = argparse.ArgumentParser(
+        description="Collect sim demos or build LeRobot datasets for diffusion policy training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Build dataset from existing .npz recordings:
+  python collect_sim_demos.py --build_only --data_dir /tmp/aic_recordings
+
+  # Build with quality filtering and image-only storage:
+  python collect_sim_demos.py --build_only --data_dir ./recordings --min_steps 30 --no_video
+
+  # Collect from simulation (requires Docker/rootfs env):
+  python collect_sim_demos.py --n_episodes 20
+
+  # Resume collection and add more episodes:
+  python collect_sim_demos.py --n_episodes 40 --resume --start_idx 20
+""",
+    )
+    # ── mode ──
+    p.add_argument("--build_only",   action="store_true",
+                   help="Skip simulation; build dataset from existing .npz files only")
+    # ── data source ──
+    p.add_argument("--data_dir",     type=str, default=None,
+                   help="Directory with .npz episode files (default: /tmp/aic_recordings)")
     p.add_argument("--n_episodes",   type=int, default=20,
-                   help="Total demonstration episodes (including resumed)")
-    p.add_argument("--dataset_name", default=REPO_ID_DEFAULT,
-                   help="LeRobot repo_id for the output dataset")
+                   help="Total demonstration episodes to collect (ignored with --build_only)")
     p.add_argument("--seed",         type=int, default=42)
     p.add_argument("--resume",       action="store_true",
-                   help="Load existing .npz files from SAVE_DIR before collecting more")
+                   help="Load existing .npz files before collecting more")
     p.add_argument("--start_idx",    type=int, default=0,
                    help="Skip the first N scenarios (use with --resume)")
+    # ── dataset output ──
+    p.add_argument("--dataset_name", default=REPO_ID_DEFAULT,
+                   help="LeRobot repo_id for the output dataset")
+    p.add_argument("--no_video",     action="store_true",
+                   help="Store images as PNG instead of mp4 video (faster for small datasets)")
+    # ── filtering ──
+    p.add_argument("--min_steps",    type=int, default=1,
+                   help="Skip episodes shorter than this many steps")
+    p.add_argument("--max_steps",    type=int, default=0,
+                   help="Truncate episodes longer than this (0 = no limit)")
+
     args = p.parse_args()
 
+    data_dir = Path(args.data_dir) if args.data_dir else SAVE_DIR
+    use_videos = not args.no_video
+
+    # ── Build-only mode ──────────────────────────────────────────────────────
+    if args.build_only:
+        print(f"Build-only mode: loading .npz episodes from {data_dir}")
+        if not data_dir.exists():
+            print(f"ERROR: data directory does not exist: {data_dir}")
+            return
+
+        episode_data = load_existing_npzs(
+            data_dir, min_steps=args.min_steps, max_steps=args.max_steps
+        )
+        if not episode_data:
+            print("ERROR: no valid episodes found.")
+            return
+
+        print_episode_stats(episode_data)
+        print(f"Building LeRobot dataset ({len(episode_data)} episodes) → '{args.dataset_name}' …")
+        build_dataset(episode_data, args.dataset_name, use_videos=use_videos)
+        print("\nDataset build complete.")
+        print(f"\nTo train diffusion policy on this dataset:")
+        print(f"  python train_diffusion.py --repo_id {args.dataset_name}")
+        return
+
+    # ── Collection mode (requires simulation) ────────────────────────────────
     scenarios = gen_scenarios(args.n_episodes, seed=args.seed)
     print(f"Collecting {args.n_episodes} sim episodes → '{args.dataset_name}'")
     print(f"Log dir: /tmp/aic_logs/\n")
@@ -478,7 +649,9 @@ def main():
 
     # Optionally load existing episodes
     if args.resume:
-        episode_data = load_existing_npzs()
+        episode_data = load_existing_npzs(
+            data_dir, min_steps=args.min_steps, max_steps=args.max_steps
+        )
         print(f"Resumed with {len(episode_data)} existing episodes.\n")
 
     for i, sc in enumerate(scenarios):
@@ -495,24 +668,34 @@ def main():
             print(f"  WARNING: episode {ep_num} timed out — skipping\n")
             continue
 
-        data = np.load(str(ep_path))
+        data = np.load(str(ep_path), allow_pickle=False)
         T = len(data["states"])
-        episode_data.append({
-            "states":  data["states"],
-            "actions": data["actions"],
-            "center":  data["center"],
-            "left":    data["left"],
-            "right":   data["right"],
-        })
-        print(f"  OK: {T} steps  →  {ep_path.name}\n")
+
+        if T < args.min_steps:
+            print(f"  WARNING: episode {ep_num} too short ({T} < {args.min_steps}) — skipping\n")
+            continue
+
+        end = min(T, args.max_steps) if args.max_steps > 0 else T
+        ep = {
+            "states":  data["states"][:end],
+            "actions": data["actions"][:end],
+            "center":  data["center"][:end],
+            "left":    data["left"][:end] if "left" in data else None,
+            "right":   data["right"][:end] if "right" in data else None,
+        }
+        episode_data.append(ep)
+        print(f"  OK: {end} steps  →  {ep_path.name}\n")
 
     if not episode_data:
         print("ERROR: no episodes collected.")
         return
 
-    print(f"\nBuilding LeRobot dataset ({len(episode_data)} episodes) …")
-    build_dataset(episode_data, args.dataset_name)
-    print("Collection complete.")
+    print_episode_stats(episode_data)
+    print(f"Building LeRobot dataset ({len(episode_data)} episodes) …")
+    build_dataset(episode_data, args.dataset_name, use_videos=use_videos)
+    print("\nCollection complete.")
+    print(f"\nTo train diffusion policy on this dataset:")
+    print(f"  python train_diffusion.py --repo_id {args.dataset_name}")
 
 
 if __name__ == "__main__":
