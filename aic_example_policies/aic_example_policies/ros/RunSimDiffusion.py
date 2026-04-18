@@ -39,13 +39,17 @@ from aic_task_interfaces.msg import Task
 from geometry_msgs.msg import Point, Pose, Quaternion, Vector3, Wrench
 from std_msgs.msg import Header
 
-# ── checkpoint location ───────────────────────────────────────────────────────
-# Allow override via environment variable; default to the workspace path
+# ── checkpoint & dataset locations ───────────────────────────────────────────
+# Allow override via environment variables; defaults to the iter10 model
 CKPT_DIR = Path(
     os.environ.get(
         "AIC_DIFFUSION_CKPT",
-        "/workspace/aic/lerobot_aic/checkpoints_diffusion_aic_cable_insertion_sim/best_model",
+        "/workspace/aic/lerobot_aic/checkpoints_diffusion_iter10/best_model",
     )
+)
+DATASET_ID = os.environ.get(
+    "AIC_DIFFUSION_DATASET",
+    "local/aic_cable_insertion_iter10",
 )
 
 IMG_H, IMG_W = 128, 144   # must match recording resolution
@@ -96,11 +100,25 @@ class RunSimDiffusion(Policy):
             )
 
         from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        from lerobot.policies.factory import make_pre_post_processors
+        from lerobot.types import PolicyAction
+        self._PolicyAction = PolicyAction
+
         self.model = DiffusionPolicy.from_pretrained(str(CKPT_DIR))
         self.model.eval()
         self.model.to(self.device)
 
-
+        # Load normalization preprocessor from training dataset stats.
+        # The model was trained with MIN_MAX normalization for STATE/ACTION and
+        # MEAN_STD for images. Without this, select_action receives raw sensor
+        # values that are completely out of the model's expected input range.
+        self.get_logger().info(f"Loading dataset normalization stats from {DATASET_ID}")
+        ds = LeRobotDataset(DATASET_ID)
+        self.preprocessor, self.postprocessor = make_pre_post_processors(
+            self.model.config, dataset_stats=ds.meta.stats
+        )
+        self.get_logger().info("Normalization preprocessor ready")
 
         n_params = sum(p.numel() for p in self.model.parameters())
         self.get_logger().info(f"DiffusionPolicy loaded on {self.device}  ({n_params:,} params)")
@@ -158,11 +176,17 @@ class RunSimDiffusion(Policy):
 
             # select_action() handles obs history and action chunk caching
             # internally; pass a single-timestep batch each control step.
-            batch = self._preprocess_obs(obs)
+            # Apply normalization before feeding to model (MIN_MAX for state,
+            # MEAN_STD for images) — the model was trained on normalized inputs.
+            raw_batch = self._preprocess_obs(obs)
+            norm_batch = self.preprocessor(raw_batch)
             with torch.no_grad():
-                action = self.model.select_action(batch)
-            # action: (1, 6) or (6,) — just the next action
-            action = action.squeeze().cpu().numpy()   # (6,)
+                norm_action = self.model.select_action(norm_batch)
+            # Denormalize the predicted action (MIN_MAX back to raw m/s units).
+            # postprocessor expects a PolicyAction (Tensor subclass), not a dict.
+            action = self.postprocessor(
+                norm_action.as_subclass(self._PolicyAction)
+            ).cpu().numpy()   # (6,) in m/s
 
             # Convert velocity → pose target (integrate current TCP pose + delta)
             cs = obs.controller_state
