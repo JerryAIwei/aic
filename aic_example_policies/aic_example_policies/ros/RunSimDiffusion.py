@@ -168,7 +168,7 @@ class RunSimDiffusion(Policy):
         self.get_logger().info("RunSimDiffusion.insert_cable() start")
         self.model.reset()   # clear model's internal obs/action queues
 
-        max_steps = 600     # 30 s at 20 Hz
+        max_steps = 2400    # 120 s at 20 Hz — matches engine time_limit
         send_feedback("RunSimDiffusion: running diffusion policy")
 
         for step in range(max_steps):
