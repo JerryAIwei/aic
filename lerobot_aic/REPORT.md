@@ -314,28 +314,109 @@ Both models achieve **100% cable insertion success** across all randomised scene
 
 ---
 
-## 9. Files
+## 9. AIC Three-Tier Scoring
+
+This section documents the AIC scoring system and the model's scored performance.
+
+### Scoring Framework
+
+The AIC scoring system uses three tiers (max 100 pts/trial):
+
+| Tier | Component | Score | Condition |
+|------|-----------|-------|-----------|
+| **Tier 1** | Model validity | 0–1 | Model loads and activates |
+| **Tier 2** | Trajectory smoothness | 0–6 | Jerk via Savitzky-Golay; 0 m/s³ → 6 pts, ≥50 → 0 |
+| **Tier 2** | Task duration | 0–12 | ≤5 s → 12 pts, ≥60 s → 0, linear |
+| **Tier 2** | Trajectory efficiency | 0–6 | Path ≤ initial plug-port dist → 6 pts |
+| **Tier 2** | Force penalty | 0 to −12 | −12 if >20 N for >1 s |
+| **Tier 2** | Contact penalty | 0 to −24 | −24 if any off-limit contact |
+| **Tier 3** | Successful insertion | −12 to 75 | Correct port: 75; Wrong: −12 |
+| **Tier 3** | Partial / proximity | 0–50 | Proportional to depth / distance |
+
+The scoring formula is implemented in `lerobot_aic/scoring.py`.
+
+### iter10 Model Evaluation (5 trials, seed=42, difficulty=iter9)
+
+Evaluation scenes use the iter9 training difficulty: board ±6.5 cm, ±8° yaw; cable ±4.3°.
+Tier 2 smoothness/efficiency require EE trajectory data (bag parsing); not yet computed.
+
+| Trial | Tier 1 | Tier 2 | Tier 3 | **Total** | Outcome | Duration |
+|-------|--------|--------|--------|-----------|---------|----------|
+| Trial 1 | 1 | 0 | 0 | **1** | Timeout | — |
+| Trial 2 | — | — | — | — | *running* | — |
+| Trial 3 | — | — | — | — | *pending* | — |
+| Trial 4 | — | — | — | — | *pending* | — |
+| Trial 5 | — | — | — | — | *pending* | — |
+
+> Results will be updated once the evaluation completes. Trial 1 timed out at the
+> eval difficulty — indicating the iter10 model has room for improvement at harder scenes.
+
+---
+
+## 10. Reward-Weighted Regression (RL Fine-tuning)
+
+### Motivation
+
+The iterative training loop (Sections 6–8) used binary success as the only reward signal.
+The AIC scoring function provides a richer reward: up to 100 pts combining task success
+(Tier 3), motion quality (Tier 2), and model validity (Tier 1). This enables:
+
+1. **Quality optimisation**: reward fast, gentle insertions over slow/rough ones
+2. **Difficulty extrapolation**: provide signal even when insertion is not achieved (proximity score)
+3. **Weighted imitation**: bias gradient steps toward high-scoring demonstrations
+
+### Algorithm: RWR (Reward-Weighted Regression)
+
+```
+For each RL iteration:
+  1. COLLECT  — Run CheatCode at hard difficulty (board ±8 cm, cable ±5°)
+                Parse AIC score components from engine logs:
+                  T1=1 (model valid) + T3=75 (insertion) + T2.duration + T2.force + T2.contact
+  2. SCORE    — episode weight wᵢ = exp(scoreᵢ / τ)   [τ = 10.0]
+                Episodes with shorter duration score higher → higher gradient weight
+  3. TRAIN    — Load iter10/best_model checkpoint
+                WeightedRandomSampler biases batches toward high-scoring episodes
+                Fine-tune for 5000 steps at lr=5e-5 (lower than initial 1e-4)
+  4. EVAL     — Compare pre/post AIC score on 5 hard eval trials
+```
+
+### Implementation
+
+| File | Role |
+|------|------|
+| `scoring.py` | Full AIC scoring library (all tier formulas from scoring.md) |
+| `eval_aic_score.py` | Single-checkpoint AIC score evaluation with engine log parsing |
+| `rl_finetune.py` | RWR pipeline: collect → score → fine-tune → evaluate |
+
+### Preliminary Results
+
+The RL pipeline was designed to run 20 CheatCode episodes at hard difficulty (board ±8 cm),
+score them with the AIC function, and fine-tune from the iter10 checkpoint.
+
+> Results to be populated after `rl_finetune.py` completes.
+
+---
+
+## 11. Files
 
 ```
 lerobot_aic/
   collect_sim_demos.py                        Data collection orchestrator
   train_diffusion.py                          Diffusion policy trainer
-  eval_success_rate.py                        Multi-trial success rate evaluation
+  eval_success_rate.py                        Binary success-rate evaluation (legacy)
+  eval_aic_score.py                           Full AIC three-tier score evaluation
+  scoring.py                                  AIC scoring library (all tiers)
+  rl_finetune.py                              Reward-weighted regression fine-tuning
   compare_with_act_baseline.py                Metrics + scoring comparison
   run_pipeline.sh                             End-to-end 20-ep pipeline
   run_double_pipeline.sh                      40-ep doubling pipeline
-  single_trial_config.yaml                    Per-episode engine config template
 
-  checkpoints_diffusion_aic_cable_insertion_sim/best_model/      20-ep checkpoint
-  checkpoints_diffusion_aic_cable_insertion_sim_40/best_model/   40-ep checkpoint
+  checkpoints_diffusion_iter10/
+    best_model/                               Best iter10 checkpoint (240 episodes)
 
-  outputs_diffusion_aic_cable_insertion_sim/
-    metrics.json                              20-ep training history
-    vs_act_comparison.json                    20-ep comparison results
-  outputs_diffusion_aic_cable_insertion_sim_40/
-    metrics.json                              40-ep training history
-    success_rate.json                         5-trial success rate comparison
-    eval_trials/                              Per-trial sim/policy logs
+  outputs_diffusion_iter10/
+    aic_score.json                            5-trial AIC scoring evaluation
+    eval_aic_score.log                        Evaluation stdout log
 
   report_assets/
     fig1_training_curves.png                  20-ep training (vs synthetic)
