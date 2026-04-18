@@ -182,10 +182,10 @@ class RunSimDiffusion(Policy):
             norm_batch = self.preprocessor(raw_batch)
             with torch.no_grad():
                 norm_action = self.model.select_action(norm_batch)
-            # Denormalize the predicted action (MIN_MAX back to raw m/s units).
-            # postprocessor expects a PolicyAction (Tensor subclass), not a dict.
+            # select_action returns shape (1, 6) or (6,); squeeze to (6,).
+            # postprocessor expects a 1-D PolicyAction (Tensor subclass).
             action = self.postprocessor(
-                norm_action.as_subclass(self._PolicyAction)
+                norm_action.reshape(6).as_subclass(self._PolicyAction)
             ).cpu().numpy()   # (6,) in m/s
 
             # Convert velocity → pose target (integrate current TCP pose + delta)
