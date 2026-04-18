@@ -169,13 +169,35 @@ class RunSimDiffusion(Policy):
             dt = 1.0 / 20.0
             vx, vy, vz, wx, wy, wz = action.tolist()
             cur = cs.tcp_pose
+
+            # Integrate angular velocity into orientation via axis-angle rotation.
+            # tcp_velocity is expressed in the world (base) frame.
+            omega = np.array([wx, wy, wz], dtype=np.float64)
+            angle = float(np.linalg.norm(omega)) * dt
+            q = np.array([cur.orientation.x, cur.orientation.y,
+                          cur.orientation.z, cur.orientation.w], dtype=np.float64)
+            if angle > 1e-8:
+                axis = omega / np.linalg.norm(omega)
+                sh, ch = np.sin(angle / 2.0), np.cos(angle / 2.0)
+                dq = np.array([axis[0]*sh, axis[1]*sh, axis[2]*sh, ch])
+                # World-frame rotation: new_q = dq ⊗ q_old
+                ax, ay, az, aw = dq
+                bx, by, bz, bw = q
+                q = np.array([
+                    aw*bx + ax*bw + ay*bz - az*by,
+                    aw*by - ax*bz + ay*bw + az*bx,
+                    aw*bz + ax*by - ay*bx + az*bw,
+                    aw*bw - ax*bx - ay*by - az*bz,
+                ])
+                q /= np.linalg.norm(q)
+
             target_pose = Pose(
                 position=Point(
                     x=cur.position.x + vx * dt,
                     y=cur.position.y + vy * dt,
                     z=cur.position.z + vz * dt,
                 ),
-                orientation=cur.orientation,   # keep current orientation for now
+                orientation=Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]),
             )
             self.set_pose_target(move_robot=move_robot, pose=target_pose)
             self.sleep_for(dt)

@@ -62,7 +62,7 @@ ROOTFS    = "/opt/aic_rootfs"
 ROS_SETUP = "/ws_aic/install/setup.bash"
 WORKSPACE = Path("/workspace/aic")
 
-SAVE_DIR   = Path("/tmp/aic_rl_recordings")
+SAVE_DIR   = Path("/tmp/aic_recordings")   # must match RecordCheatCode.SAVE_DIR
 CONFIG_DIR = Path("/tmp/aic_rl_configs")
 LOG_DIR    = Path("/tmp/aic_rl_logs")
 
