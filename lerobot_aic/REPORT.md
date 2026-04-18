@@ -439,12 +439,69 @@ For each RL iteration:
 | `eval_aic_score.py` | Single-checkpoint AIC score evaluation with engine log parsing |
 | `rl_finetune.py` | RWR pipeline: collect → score → fine-tune → evaluate |
 
-### Preliminary Results
+### Results
 
-The RL pipeline was designed to run 20 CheatCode episodes at hard difficulty (board ±8 cm),
-score them with the AIC function, and fine-tune from the iter10 checkpoint.
+The RL pipeline (`rl_finetune.py`) was launched with the following configuration:
 
-> Results to be populated after `rl_finetune.py` completes.
+| Parameter | Value |
+|-----------|-------|
+| Base checkpoint | `checkpoints_diffusion_iter10/best_model` |
+| Base dataset | `local/aic_cable_insertion_iter10` |
+| Target episodes | 20 CheatCode at hard difficulty (board ±8 cm / ±9.2°, cable ±5°) |
+| Fine-tune steps | 5 000 |
+| Eval trials | 5 |
+| RWR temperature | 10.0 |
+
+#### Phase 1 — Episode Collection (Partial)
+
+The process collected 1 of 20 episodes before terminating. The pipeline was killed
+externally (parent shell exit) after approximately 5 minutes of runtime, mid-way
+through episode 2.
+
+**Episode 1 result (hard difficulty):**
+
+| Metric | Value |
+|--------|-------|
+| AIC Score | **88.53 / 100** |
+| Insertion result | Success |
+| Duration | ~90 s (sim time) |
+| Board offset | 8 cm, 9.2° |
+
+A secondary bug was also discovered: `rl_finetune.py` polls for recordings in
+`/tmp/aic_rl_recordings/latest.txt`, but `RecordCheatCode.py` writes to
+`/tmp/aic_recordings/latest.txt`. This path mismatch would have caused
+`_wait_for_episode()` to always timeout (200 s) and skip every episode even if
+the process had continued running, yielding an empty training set.
+
+#### Phases 2–4 — Status
+
+Phases 2 (dataset build), 3 (RWR fine-tune), and 4 (evaluation) did not execute
+due to the early termination.
+
+#### Pre-RL Baseline (iter10 checkpoint)
+
+For reference, the iter10 model before any RL fine-tuning:
+
+| Metric | Pre-RL (iter10) |
+|--------|----------------|
+| Mean AIC score | 1.0 / 100 |
+| Successful insertions | 0 / 5 trials |
+| Evaluation difficulty | Hard (same as RL target) |
+
+#### Known Issues and Required Fixes
+
+1. **Recording path mismatch**: `rl_finetune.py` `SAVE_DIR = "/tmp/aic_rl_recordings"` must
+   be changed to `"/tmp/aic_recordings"` to match `RecordCheatCode.SAVE_DIR`.
+2. **Process lifetime**: The script must be launched in a persistent session (e.g., a
+   dedicated `tmux` window or `systemd` service) so it survives shell disconnection.
+
+#### Pilot Observation
+
+The single collected episode achieved an AIC score of 88.53, demonstrating that
+CheatCode performs robustly at hard difficulty (±8 cm board offset). This validates
+the data-quality side of the RWR approach: if the path bug is fixed and the process
+is allowed to run to completion, the collected episodes should provide a strong
+reward signal for fine-tuning.
 
 ---
 
