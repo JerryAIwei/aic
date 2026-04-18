@@ -373,34 +373,56 @@ The AIC scoring system uses three tiers (max 100 pts/trial):
 
 The scoring formula is implemented in `lerobot_aic/scoring.py`.
 
-### iter10 Model Evaluation (5 trials, seed=42, difficulty = iter9 training max)
+### Inference Bug Audit and Fixes
 
-Evaluation scenes use the maximum iter9 training difficulty: board ±6.5 cm, ±8° yaw; cable ±4.3°.
-The AIC engine reports tier scores directly in its log output. Tier 2 smoothness/efficiency
-require end-effector trajectory data from bag files; not reported here.
+Before evaluating model capability, a thorough audit of `RunSimDiffusion.py` uncovered
+**6 inference bugs** that were silently causing the policy to either crash or produce garbage:
+
+| # | Bug | Root Cause | Impact |
+|---|-----|-----------|--------|
+| 1 | **No input normalisation** | `select_action` called with raw sensor values; model trained expecting MIN_MAX/MEAN_STD-normalised inputs | Model input far outside training distribution → garbage predictions |
+| 2 | **Wrong postprocessor API** | `postprocessor({"action": tensor})` — postprocessor expects a `PolicyAction` tensor, not a dict | `ValueError` on step 0 → policy crashes immediately, robot stays still |
+| 3 | **Action shape mismatch** | `select_action` returns `(1, 6)` but code unpacked as `(vx, vy, vz, wx, wy, wz)` | `ValueError: not enough values to unpack` → crash |
+| 4 | **Angular velocity ignored** | `wx, wy, wz` predicted by model but only position integrated | Robot never rotates to align plug with port |
+| 5 | **Eval difficulty too hard** | Scenarios at ±6.5 cm (only 20/240 training episodes) | Under-represented distribution, even correct model would struggle |
+| 6 | **Source not installed** | Edits to `/workspace/aic/…/RunSimDiffusion.py` not picked up — ROS node loads from `/ws_aic/install/…` | All source fixes silently ignored |
+
+All 6 bugs were fixed and deployed. Fixes are in commits `c144e4c`, `330c4eb`, `145c693`, `370ee0a`.
+
+### iter10 Model Evaluation (5 trials, seed=42, difficulty ±3 cm — after bug fixes)
+
+Evaluation scenes use ±3 cm board offset / ±5° yaw (core training distribution). The eval
+framework (`eval_aic_score.py`) correctly parses engine tier scores from logs.
 
 | Trial | Board offset | Yaw (rad) | Tier 1 | Tier 2 | Tier 3 | **Total** | Outcome |
 |-------|-------------|-----------|--------|--------|--------|-----------|---------|
-| 1 | (0.134, −0.141) | 3.207 | 1 | 0 | 0 | **1** | Timeout (265 s) |
-| 2 | (0.093, −0.152) | 3.170 | 1 | 0 | 0 | **1** | Timeout (268 s) |
-| 3 | (0.193, −0.237) | 3.052 | 1 | 0 | 0 | **1** | Timeout (268 s) |
-| 4 | (0.141, −0.227) | 3.173 | 1 | 0 | 0 | **1** | Timeout (266 s) |
-| 5 | (0.144, −0.163) | 3.057 | 1 | 0 | 0 | **1** | Timeout (255 s) |
+| 1 | (0.142, −0.173) | 3.182 | 1 | 0 | 0 | **1** | No contact (349 s) |
+| 2–5 | ±3 cm range | varied | 1 | 0 | 0 | **1** | No contact |
 | **Mean** | | | **1.0** | **0.0** | **0.0** | **1.0** | |
 
 **Success rate: 0/5 (0%)** — Mean AIC score: **1.0 / 100**
 
-**Finding**: At the maximum training difficulty (±6.5 cm board, ±4.3° cable), the model
-consistently reaches its 120 s per-step timeout without inserting the cable. All episodes
-are valid (Tier 1 = 1), but zero trajectory or insertion scores are recorded (Tier 2 = Tier 3 = 0).
-This contrasts sharply with the earlier binary evaluation (±1.5 cm, 100% success) and
-reveals a generalisation gap at hardest configurations that binary success/failure cannot quantify.
+The engine logs "No contact detected" for every trial, confirming the robot never approaches
+the port — it moves, but not toward the insertion target.
 
-**Analysis**: The previous 100% success evaluation used ±1.5 cm perturbation (easy baseline).
-The iter10 training included scenes at ±6.5 cm but these are the hardest 20 episodes in a
-240-episode corpus. The model sees too few hard-difficulty episodes to generalise to them.
-The AIC scoring function provides a smooth reward even when insertion fails (proximity, duration)
-which directly motivates the score-guided RL fine-tuning in the next section.
+**Root cause of failure (model capability, not code)**: The Diffusion Policy was trained
+to reproduce CheatCode demonstrations. CheatCode uses ground-truth TF lookups to navigate
+to the port; the trained model receives only camera images and state. The training images
+have extremely low inter-episode variance (mean ≈ 0.58, std ≈ 0.008 across all cameras),
+indicating the training scenes look nearly identical regardless of board pose. The model
+therefore learned to reproduce a single memorised trajectory rather than learning
+vision-guided port navigation — it moves to approximately the same world-frame position
+each trial regardless of where the port actually is.
+
+**Comparison with binary eval**: The earlier "100% success" evaluation (Section 8) used
+`eval_success_rate.py` which parsed "total score is: 1.000000" and incorrectly mapped it
+to insertion success. Score 1.0 means only Tier 1 = 1 (model loaded), **not** insertion.
+That metric was a false positive; cable insertion via the diffusion model was never
+confirmed by the AIC engine in any trial.
+
+**Implication**: The RL fine-tuning approach (Section 11) addresses this directly by
+providing explicit reward signal from the AIC engine, enabling score-guided data collection
+at varying difficulty levels.
 
 ---
 
