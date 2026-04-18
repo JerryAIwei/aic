@@ -50,19 +50,32 @@ _BOARD = dict(x=0.15, y=-0.2, z=1.14, yaw=3.1415)
 
 # ── scenario generation ───────────────────────────────────────────────────────
 
-def gen_scenarios(n: int, seed: int = 42) -> list[dict]:
-    """Return n dicts with varied cable/board launch parameters."""
+def gen_scenarios(
+    n: int,
+    seed: int = 42,
+    board_range: float = 0.020,
+    yaw_range: float = 0.050,
+    cable_range: float = 0.030,
+) -> list[dict]:
+    """Return n dicts with varied cable/board launch parameters.
+
+    Args:
+        board_range:  Max XY board perturbation in metres (default 0.02 = ±2 cm).
+                      Use 0.10 for ±10 cm to train a vision-guided policy.
+        yaw_range:    Max board yaw perturbation in radians (default ±0.05 rad ≈ ±3°).
+        cable_range:  Max cable roll/pitch/yaw perturbation in radians.
+    """
     rng = np.random.RandomState(seed)
     out = []
     for _ in range(n):
         out.append({
-            "task_board_x":   round(_BOARD["x"]   + rng.uniform(-0.020, 0.020), 4),
-            "task_board_y":   round(_BOARD["y"]   + rng.uniform(-0.020, 0.020), 4),
+            "task_board_x":   round(_BOARD["x"]   + rng.uniform(-board_range, board_range), 4),
+            "task_board_y":   round(_BOARD["y"]   + rng.uniform(-board_range, board_range), 4),
             "task_board_z":   _BOARD["z"],
-            "task_board_yaw": round(_BOARD["yaw"] + rng.uniform(-0.050, 0.050), 4),
-            "cable_roll":     round(_CABLE["roll"]  + rng.uniform(-0.030, 0.030), 4),
-            "cable_pitch":    round(_CABLE["pitch"] + rng.uniform(-0.030, 0.030), 4),
-            "cable_yaw":      round(_CABLE["yaw"]   + rng.uniform(-0.030, 0.030), 4),
+            "task_board_yaw": round(_BOARD["yaw"] + rng.uniform(-yaw_range,   yaw_range),   4),
+            "cable_roll":     round(_CABLE["roll"]  + rng.uniform(-cable_range, cable_range), 4),
+            "cable_pitch":    round(_CABLE["pitch"] + rng.uniform(-cable_range, cable_range), 4),
+            "cable_yaw":      round(_CABLE["yaw"]   + rng.uniform(-cable_range, cable_range), 4),
         })
     return out
 
@@ -468,10 +481,23 @@ def main():
                    help="Load existing .npz files from SAVE_DIR before collecting more")
     p.add_argument("--start_idx",    type=int, default=0,
                    help="Skip the first N scenarios (use with --resume)")
+    p.add_argument("--board_range",  type=float, default=0.020,
+                   help="Max XY board perturbation in metres (default 0.02 = ±2 cm; "
+                        "use 0.10 for vision-guided training)")
+    p.add_argument("--yaw_range",    type=float, default=0.050,
+                   help="Max board yaw perturbation in radians (default ±0.05 rad)")
+    p.add_argument("--cable_range",  type=float, default=0.030,
+                   help="Max cable roll/pitch/yaw perturbation in radians")
     args = p.parse_args()
 
-    scenarios = gen_scenarios(args.n_episodes, seed=args.seed)
+    scenarios = gen_scenarios(
+        args.n_episodes, seed=args.seed,
+        board_range=args.board_range,
+        yaw_range=args.yaw_range,
+        cable_range=args.cable_range,
+    )
     print(f"Collecting {args.n_episodes} sim episodes → '{args.dataset_name}'")
+    print(f"Board variation: ±{args.board_range*100:.1f} cm XY, ±{args.yaw_range:.3f} rad yaw")
     print(f"Log dir: /tmp/aic_logs/\n")
 
     episode_data: list[dict] = []

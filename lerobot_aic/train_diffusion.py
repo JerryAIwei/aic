@@ -36,14 +36,16 @@ Usage
 import argparse
 import csv
 import json
+import random
 import time
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import ConcatDataset, DataLoader, random_split
 
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -137,23 +139,37 @@ class DiffusionTrainer:
 
         # ── Dataset ──────────────────────────────────────────────────────────
         repo_id = cfg.get("repo_id") or REPO_ID
+        _delta_ts = {
+            "observation.state": [0.0, -1 / FPS],
+            "observation.images.center_camera": [0.0, -1 / FPS],
+            "observation.images.left_camera":   [0.0, -1 / FPS],
+            "observation.images.right_camera":  [0.0, -1 / FPS],
+            "action": [i / FPS for i in range(HORIZON)],
+        }
         print(f"Loading dataset: {repo_id} …")
         self.full_ds = LeRobotDataset(
-            repo_id=repo_id,
-            delta_timestamps={
-                "observation.state": [0.0, -1 / FPS],
-                "observation.images.center_camera": [0.0, -1 / FPS],
-                "observation.images.left_camera":   [0.0, -1 / FPS],
-                "observation.images.right_camera":  [0.0, -1 / FPS],
-                "action": [i / FPS for i in range(HORIZON)],
-            },
-            video_backend="pyav",   # torchcodec needs libavutil.so.56/57; pyav uses system ffmpeg
+            repo_id=repo_id, delta_timestamps=_delta_ts,
+            video_backend="pyav",
         )
-        n_total = len(self.full_ds)
+
+        # Optional second dataset to concatenate (e.g. high-variation vision data)
+        concat_id = cfg.get("concat_repo_id")
+        if concat_id:
+            print(f"Concatenating extra dataset: {concat_id} …")
+            extra_ds = LeRobotDataset(
+                repo_id=concat_id, delta_timestamps=_delta_ts,
+                video_backend="pyav",
+            )
+            combined = ConcatDataset([self.full_ds, extra_ds])
+            print(f"Combined frames: {len(self.full_ds):,} + {len(extra_ds):,} = {len(combined):,}")
+        else:
+            combined = self.full_ds
+
+        n_total = len(combined)
         n_val   = max(1, int(0.15 * n_total))
         n_train = n_total - n_val
         train_ds, val_ds = random_split(
-            self.full_ds, [n_train, n_val],
+            combined, [n_train, n_val],
             generator=torch.Generator().manual_seed(42),
         )
         self.train_loader = DataLoader(
@@ -176,6 +192,23 @@ class DiffusionTrainer:
         self.preprocessor, _ = make_pre_post_processors(
             diff_cfg, dataset_stats=self.full_ds.meta.stats
         )
+        self.augment = bool(cfg.get("augment", False))
+        if self.augment:
+            print("Image augmentation: ENABLED (color jitter + spatial shift ±8px)")
+
+        # ── Fine-tune from pretrained checkpoint ─────────────────────────────
+        if cfg.get("finetune_from"):
+            ft_path = Path(cfg["finetune_from"])
+            print(f"Fine-tuning from: {ft_path}")
+            from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy as _DP
+            pretrained = _DP.from_pretrained(str(ft_path))
+            missing, unexpected = self.model.load_state_dict(
+                pretrained.state_dict(), strict=False
+            )
+            del pretrained
+            if missing:
+                print(f"  Missing keys (will be randomly init'd): {len(missing)}")
+            print("  Pretrained weights loaded.")
 
         # ── Optimiser ────────────────────────────────────────────────────────
         self.optimizer = AdamW(
@@ -211,10 +244,11 @@ class DiffusionTrainer:
             },
             "training": cfg,
             "dataset": {
-                "repo_id": repo_id,
-                "n_train": n_train,
-                "n_val":   n_val,
-                "cameras": ["center_camera", "left_camera", "right_camera"],
+                "repo_id":        repo_id,
+                "concat_repo_id": cfg.get("concat_repo_id"),
+                "n_train":        n_train,
+                "n_val":          n_val,
+                "cameras":        ["center_camera", "left_camera", "right_camera"],
             },
         }, open(self.out_dir / "run_config.json", "w"), indent=2)
 
@@ -228,14 +262,57 @@ class DiffusionTrainer:
         """Normalise inputs. DiffusionPolicy expects (B, n_obs_steps, ...) for obs."""
         return self.preprocessor(batch)
 
+    _CAMERA_KEYS = [
+        "observation.images.center_camera",
+        "observation.images.left_camera",
+        "observation.images.right_camera",
+    ]
+
+    def _augment_batch(self, batch: dict) -> dict:
+        """Apply per-batch image augmentation before normalization.
+
+        Applies identical spatial shift (pad + crop) to all cameras in the batch,
+        and independent brightness/contrast jitter.  Images are expected in [0, 1].
+
+        Camera tensors are shaped (B, T, C, H, W) or (B, C, H, W).
+        """
+        for key in self._CAMERA_KEYS:
+            if key not in batch:
+                continue
+            imgs = batch[key]            # (B, T, C, H, W) or (B, C, H, W)
+            orig_shape = imgs.shape
+            H, W = imgs.shape[-2], imgs.shape[-1]
+            flat = imgs.reshape(-1, imgs.shape[-3], H, W)   # (N, C, H, W)
+
+            # ── Color jitter (brightness + contrast, independent per image) ──
+            if random.random() < 0.8:
+                factors = torch.empty(flat.shape[0], 1, 1, 1, device=flat.device).uniform_(0.75, 1.25)
+                flat = (flat * factors).clamp(0.0, 1.0)
+            if random.random() < 0.5:
+                mean = flat.mean(dim=(-3, -2, -1), keepdim=True)
+                factor = random.uniform(0.8, 1.2)
+                flat = (mean + (flat - mean) * factor).clamp(0.0, 1.0)
+
+            # ── Spatial shift: pad 8px then crop back to original size ───────
+            pad = 8
+            flat = F.pad(flat, [pad, pad, pad, pad], mode="reflect")
+            top  = random.randint(0, 2 * pad)
+            left = random.randint(0, 2 * pad)
+            flat = flat[:, :, top: top + H, left: left + W]
+
+            batch[key] = flat.reshape(orig_shape)
+        return batch
+
     # ── Epoch ─────────────────────────────────────────────────────────────────
 
     def _run_epoch(self, loader: DataLoader, train: bool) -> dict:
-        self.model.train(True)
+        self.model.train(train)
         total_loss, n = 0.0, 0
         with torch.set_grad_enabled(train):
             for batch in loader:
                 batch = self._to_device(batch)
+                if train and self.augment:
+                    batch = self._augment_batch(batch)
                 batch = self._prep_batch(batch)
 
                 out  = self.model(batch)
@@ -313,10 +390,18 @@ def parse_args():
     p.add_argument("--weight_decay", type=float, default=1e-6)
     p.add_argument("--save_every",   type=int,   default=5,
                    help="Save checkpoint every N epochs")
-    p.add_argument("--repo_id",      type=str,   default=None,
+    p.add_argument("--repo_id",        type=str,   default=None,
                    help="Override dataset repo_id (default: local/aic_cable_insertion_large)")
-    p.add_argument("--run_name",     type=str,   default=None,
+    p.add_argument("--run_name",       type=str,   default=None,
                    help="Tag appended to output/checkpoint dirs (e.g. 'sim')")
+    p.add_argument("--augment",          action="store_true",
+                   help="Enable image augmentation during training (color jitter + spatial shift)")
+    p.add_argument("--finetune_from",    type=str,   default=None,
+                   help="Path to a pretrained DiffusionPolicy checkpoint to fine-tune from "
+                        "(e.g. checkpoints_diffusion_iter10/best_model)")
+    p.add_argument("--concat_repo_id",   type=str,   default=None,
+                   help="Second dataset to concatenate with --repo_id for combined training "
+                        "(e.g. local/aic_cable_insertion_vision)")
     return vars(p.parse_args())
 
 

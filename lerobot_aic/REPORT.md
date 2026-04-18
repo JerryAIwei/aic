@@ -527,7 +527,128 @@ reward signal for fine-tuning.
 
 ---
 
-## 12. Files
+## 12. Vision-Guided Policy Training
+
+### Problem: Memorised Trajectory vs Visual Navigation
+
+Post-deployment analysis of the iter10 model revealed a fundamental failure mode:
+the policy learned to **replay a memorised average trajectory** rather than
+navigate by visual feedback.
+
+| Diagnostic | Finding |
+|------------|---------|
+| Inter-episode image std (iter10) | **0.008** (nearly identical scenes) |
+| Board variation in training | ±2 cm XY (60 px field-of-view → ±5 px shift) |
+| Spatial softmax behaviour | Fixed keypoints regardless of board position |
+| Eval result (iter10, 0/5 trials) | "No contact detected" — robot misses the port |
+
+Because every training frame shows the port at roughly the same pixel location,
+the ResNet-18 spatial softmax learns static feature detectors instead of tracking
+the port's position relative to the camera.
+
+### Solution: High-Variation Data + Image Augmentation
+
+A two-phase vision-guided training pipeline was implemented:
+
+#### New CLI Arguments
+
+**`collect_sim_demos.py`** — scene diversity control:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--board_range` | 0.02 (±2 cm) | Max XY board perturbation in metres |
+| `--yaw_range` | 0.05 (±0.05 rad) | Max board yaw perturbation |
+| `--cable_range` | 0.03 (±0.03 rad) | Max cable roll/pitch/yaw perturbation |
+
+**`train_diffusion.py`** — training enhancements:
+
+| Argument | Description |
+|----------|-------------|
+| `--augment` | Enable color jitter + ±8px spatial shift during training |
+| `--finetune_from <path>` | Load pretrained weights for fine-tuning |
+| `--concat_repo_id <id>` | Concatenate a second dataset with the primary |
+
+#### Image Augmentation (`_augment_batch`)
+
+Applied after `_to_device` but before normalization (raw [0,1] tensors):
+
+1. **Brightness jitter** (p=0.8): uniform scale ∈ [0.75, 1.25] per image
+2. **Contrast jitter** (p=0.5): mean-centred scale ∈ [0.80, 1.20]
+3. **Spatial shift** (always): `reflect`-pad 8px all sides → random crop back to
+   original 128×144 size (effective shift ±8px in each direction)
+
+The same random crop offset is applied to all cameras simultaneously, preserving
+the geometric consistency between the three camera views.
+
+#### Training Pipeline
+
+**Phase 1 — Augmented fine-tune (immediate, runs in parallel):**
+
+```bash
+python train_diffusion.py \
+    --repo_id local/aic_cable_insertion_iter10 \
+    --run_name vision_finetune_aug \
+    --steps 10000 --lr 2e-5 --augment \
+    --finetune_from checkpoints_diffusion_iter10/best_model
+```
+
+*Rationale:* Teaches the model to be robust to small image shifts even on
+existing data; provides a deployable checkpoint while high-variation data collects.
+
+**Phase 2 — High-variation data collection (background, ~2 h for 30 episodes):**
+
+```bash
+python collect_sim_demos.py \
+    --n_episodes 30 --board_range 0.10 --yaw_range 0.15 \
+    --dataset_name local/aic_cable_insertion_vision
+```
+
+Board variation increased to **±10 cm** (5× original) so the port appears at
+genuinely different pixel locations across episodes. With 128 px images and a
+~50 cm field of view, 10 cm board shift ≈ 25 px image shift — large enough to
+force the spatial softmax to learn a port-tracking detector.
+
+**Phase 3 — Combined fine-tune on iter10 + vision data:**
+
+```bash
+python train_diffusion.py \
+    --repo_id local/aic_cable_insertion_iter10 \
+    --concat_repo_id local/aic_cable_insertion_vision \
+    --run_name vision_finetune_combined \
+    --steps 15000 --lr 1e-5 --augment \
+    --finetune_from checkpoints_diffusion_iter10/best_model
+```
+
+*Rationale:* The iter10 data (240 ep, 127 k frames) provides good motor skills
+(smooth Cartesian control); the vision data (30 ep) forces the visual encoder to
+learn port-relative features rather than a memorised trajectory.
+
+### Expected Outcomes
+
+| Metric | iter10 baseline | Vision-guided (expected) |
+|--------|----------------|--------------------------|
+| Inter-episode image std | 0.008 | > 0.04 |
+| Eval success (±3 cm) | 0 / 5 | > 2 / 5 |
+| Behaviour | Fixed trajectory | Visual port navigation |
+
+### New Policy Runner
+
+`RunVisionDiffusion.py` — identical inference logic to `RunSimDiffusion.py` but
+points to `checkpoints_diffusion_vision_finetune_combined/best_model`.
+
+```bash
+ros2 run aic_model aic_model \
+    --ros-args -p policy:=aic_example_policies.ros.RunVisionDiffusion.RunVisionDiffusion
+```
+
+Override checkpoint at runtime:
+```bash
+export AIC_VISION_CKPT=/path/to/checkpoint
+```
+
+---
+
+## 13. Files
 
 ```
 lerobot_aic/
@@ -562,5 +683,6 @@ lerobot_aic/
 
 aic_example_policies/aic_example_policies/ros/
   RecordCheatCode.py                          Demonstration recorder
-  RunSimDiffusion.py                          Inference policy (fixed obs API)
+  RunSimDiffusion.py                          Inference policy (iter10 checkpoint)
+  RunVisionDiffusion.py                       Vision-guided policy (fine-tuned checkpoint)
 ```
