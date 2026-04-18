@@ -43,7 +43,7 @@ from std_msgs.msg import Header
 CKPT_DIR = Path(
     os.environ.get(
         "AIC_VISION_CKPT",
-        "/workspace/aic/lerobot_aic/checkpoints_diffusion_vision_finetune_combined/best_model",
+        "/workspace/aic/lerobot_aic/checkpoints_diffusion_vision_fast_v2/best_model",
     )
 )
 # Use iter10 stats for normalization (primary dataset from fine-tuning).
@@ -96,10 +96,10 @@ class RunVisionDiffusion(Policy):
         if not CKPT_DIR.exists():
             raise FileNotFoundError(
                 f"Checkpoint not found: {CKPT_DIR}\n"
-                "Run the vision fine-tuning pipeline first:\n"
-                "  1. python lerobot_aic/collect_sim_demos.py --board_range 0.10 "
-                "--dataset_name local/aic_cable_insertion_vision\n"
-                "  2. bash /tmp/train_vision_phase2.sh"
+                "Run the vision fine-tuning pipeline:\n"
+                "  python lerobot_aic/train_vision_fast.py "
+                "--npz_dir /tmp/aic_recordings_iter10_backup --steps 6000 "
+                "--run_name vision_fast_v2"
             )
 
         from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy

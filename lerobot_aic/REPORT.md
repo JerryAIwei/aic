@@ -580,61 +580,81 @@ Applied after `_to_device` but before normalization (raw [0,1] tensors):
 The same random crop offset is applied to all cameras simultaneously, preserving
 the geometric consistency between the three camera views.
 
-#### Training Pipeline
+#### Training Tool: `train_vision_fast.py`
 
-**Phase 1 — Augmented fine-tune (immediate, runs in parallel):**
+The standard `train_diffusion.py` uses the LeRobot video backend (PyAV) for I/O.
+Random-access decoding at training time makes PyAV prohibitively slow
+(~1 s/seek × 48 seeks/batch = minutes per batch for 127 k-frame datasets).
 
+`train_vision_fast.py` bypasses this by loading all `.npz` episode files into RAM
+as numpy arrays at startup, then serving batches via direct numpy indexing.
+This makes the training **GPU-bound** instead of I/O-bound:
+
+| Backend | Time per epoch (21 ep / ~10 k samples) |
+|---------|----------------------------------------|
+| PyAV (LeRobot video) | > 60 min (estimated) |
+| In-memory `.npz` | **~61 s** |
+
+#### Actual Training Results
+
+Two sequential fine-tuning passes were run, each starting from the best checkpoint
+of the previous:
+
+**Pass 1 (vision_fast_v1):** `lr=5e-6`, 3000 steps (~6 epochs)
+
+| Epoch | Train loss | Val loss | Best |
+|-------|-----------|---------|------|
+| 1 | 0.00999 | 0.00896 | ✓ |
+| 3 | 0.00918 | 0.00880 | ✓ |
+| 4 | 0.00948 | 0.00872 | ✓ |
+| 5 | 0.00955 | 0.00747 | ✓ |
+
+Best val loss: **0.00747** (vs iter10 baseline ~0.023)
+
+**Pass 2 (vision_fast_v2):** `lr=1e-5`, 6000 steps (~11 epochs), from v1 best
+
+| Epoch | Train loss | Val loss | Best |
+|-------|-----------|---------|------|
+| 1 | 0.00906 | 0.00867 | ✓ |
+| 5 | 0.00786 | 0.00816 | ✓ |
+| 6 | 0.00854 | 0.00677 | ✓ |
+
+Best val loss: **0.00677** — 3.4× lower than iter10 on the same test trajectories.
+
+**Command to reproduce:**
 ```bash
-python train_diffusion.py \
-    --repo_id local/aic_cable_insertion_iter10 \
-    --run_name vision_finetune_aug \
-    --steps 10000 --lr 2e-5 --augment \
-    --finetune_from checkpoints_diffusion_iter10/best_model
+# Pass 1
+python train_vision_fast.py \
+    --npz_dir /tmp/aic_recordings_iter10_backup \
+    --run_name vision_fast_v1 --steps 3000 --lr 5e-6
+
+# Pass 2 (from v1 best)
+python train_vision_fast.py \
+    --npz_dir /tmp/aic_recordings_iter10_backup \
+    --run_name vision_fast_v2 --steps 6000 --lr 1e-5 \
+    --finetune_from checkpoints_diffusion_vision_fast_v1/best_model
 ```
 
-*Rationale:* Teaches the model to be robust to small image shifts even on
-existing data; provides a deployable checkpoint while high-variation data collects.
+### Training Data Diagnostics
 
-**Phase 2 — High-variation data collection (background, ~2 h for 30 episodes):**
+| Metric | iter10 dataset | Vision fine-tune data |
+|--------|----------------|----------------------|
+| Episodes | 240 | 21 |
+| Frames | 127,200 | 10,794 (in-memory samples) |
+| Inter-episode image std | 0.008 | 0.015 |
+| Board variation | ±2 cm | ±2 cm (same data, varied by augmentation) |
+| Augmentation | None | Color jitter + ±8px spatial shift |
 
-```bash
-python collect_sim_demos.py \
-    --n_episodes 30 --board_range 0.10 --yaw_range 0.15 \
-    --dataset_name local/aic_cable_insertion_vision
-```
-
-Board variation increased to **±10 cm** (5× original) so the port appears at
-genuinely different pixel locations across episodes. With 128 px images and a
-~50 cm field of view, 10 cm board shift ≈ 25 px image shift — large enough to
-force the spatial softmax to learn a port-tracking detector.
-
-**Phase 3 — Combined fine-tune on iter10 + vision data:**
-
-```bash
-python train_diffusion.py \
-    --repo_id local/aic_cable_insertion_iter10 \
-    --concat_repo_id local/aic_cable_insertion_vision \
-    --run_name vision_finetune_combined \
-    --steps 15000 --lr 1e-5 --augment \
-    --finetune_from checkpoints_diffusion_iter10/best_model
-```
-
-*Rationale:* The iter10 data (240 ep, 127 k frames) provides good motor skills
-(smooth Cartesian control); the vision data (30 ep) forces the visual encoder to
-learn port-relative features rather than a memorised trajectory.
-
-### Expected Outcomes
-
-| Metric | iter10 baseline | Vision-guided (expected) |
-|--------|----------------|--------------------------|
-| Inter-episode image std | 0.008 | > 0.04 |
-| Eval success (±3 cm) | 0 / 5 | > 2 / 5 |
-| Behaviour | Fixed trajectory | Visual port navigation |
+Note: the fine-tuning data has the same physical board variation as iter10
+(±2 cm). The spatial augmentation adds synthetic image-space diversity during
+training, nudging the visual encoder toward position-relative features.
+For larger board variation (±10 cm) to be used, the simulation controller
+loading issue must first be resolved.
 
 ### New Policy Runner
 
 `RunVisionDiffusion.py` — identical inference logic to `RunSimDiffusion.py` but
-points to `checkpoints_diffusion_vision_finetune_combined/best_model`.
+points to `checkpoints_diffusion_vision_fast_v2/best_model`.
 
 ```bash
 ros2 run aic_model aic_model \
@@ -662,8 +682,14 @@ lerobot_aic/
   run_pipeline.sh                             End-to-end 20-ep pipeline
   run_double_pipeline.sh                      40-ep doubling pipeline
 
+  train_vision_fast.py                        Fast in-memory vision fine-tuning
+
   checkpoints_diffusion_iter10/
     best_model/                               Best iter10 checkpoint (240 episodes)
+  checkpoints_diffusion_vision_fast_v1/
+    best_model/                               Vision fine-tune pass 1 (val loss 0.00747)
+  checkpoints_diffusion_vision_fast_v2/
+    best_model/                               Vision fine-tune pass 2 (val loss 0.00677)
 
   outputs_diffusion_iter10/
     aic_score.json                            5-trial AIC scoring evaluation
