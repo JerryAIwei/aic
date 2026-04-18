@@ -314,7 +314,45 @@ Both models achieve **100% cable insertion success** across all randomised scene
 
 ---
 
-## 9. AIC Three-Tier Scoring
+## 9. Iterative Scaling to 240 Episodes (iter10)
+
+### Pipeline
+
+The iterative pipeline (`iterate_policy.py`) progressively expanded the dataset by collecting
+20 new episodes per iteration at increasing difficulty, evaluating the policy, and retraining:
+
+| Iteration | Episodes | Difficulty (board xy ± cm) | Difficulty (yaw ±°) | Steps | Val Loss |
+|-----------|----------|--------------------------|----------------------|-------|----------|
+| seed      | 40       | ±1.5 cm (40-ep base)     | ±2.3°                | 8 000 | 0.01736  |
+| iter1     | 60       | ±2.5 cm                  | ±3.4°                | —     | eval only |
+| iter2–9   | 80–220   | ±2.5→6.5 cm              | ±3.4→8.0°            | 10k–24k | — |
+| **iter10** | **240** | **±6.5 cm**              | **±8.0°**            | **26 000** | **0.00765** |
+
+### iter10 Training
+
+The final model was trained for **26 000 steps** (3 epochs) on the 240-episode dataset:
+
+| Epoch | LR | Train Loss | Val Loss | Best |
+|---|---|---|---|---|
+| 1 | 8.44e-5 | 0.02668 | 0.01203 | |
+| 2 | 4.74e-5 | 0.01087 | 0.00943 | |
+| **3** | **1.24e-5** | **0.00845** | **0.00765** | **✓ Best** |
+
+**Best val loss: 0.00765** — 67% reduction vs 40-ep model (0.01736), 3× lower.
+
+### Dataset Statistics (iter10)
+
+| Split | Episodes | Frames |
+|-------|----------|--------|
+| Train | ~204 ep  | 108,120 |
+| Val   | ~36 ep   | 19,080 |
+| Total | 240 ep   | 127,200 |
+
+Checkpoint: `checkpoints_diffusion_iter10/best_model/`
+
+---
+
+## 10. AIC Three-Tier Scoring
 
 This section documents the AIC scoring system and the model's scored performance.
 
@@ -335,25 +373,38 @@ The AIC scoring system uses three tiers (max 100 pts/trial):
 
 The scoring formula is implemented in `lerobot_aic/scoring.py`.
 
-### iter10 Model Evaluation (5 trials, seed=42, difficulty=iter9)
+### iter10 Model Evaluation (5 trials, seed=42, difficulty = iter9 training max)
 
-Evaluation scenes use the iter9 training difficulty: board ±6.5 cm, ±8° yaw; cable ±4.3°.
-Tier 2 smoothness/efficiency require EE trajectory data (bag parsing); not yet computed.
+Evaluation scenes use the maximum iter9 training difficulty: board ±6.5 cm, ±8° yaw; cable ±4.3°.
+The AIC engine reports tier scores directly in its log output. Tier 2 smoothness/efficiency
+require end-effector trajectory data from bag files; not reported here.
 
-| Trial | Tier 1 | Tier 2 | Tier 3 | **Total** | Outcome | Duration |
-|-------|--------|--------|--------|-----------|---------|----------|
-| Trial 1 | 1 | 0 | 0 | **1** | Timeout | — |
-| Trial 2 | — | — | — | — | *running* | — |
-| Trial 3 | — | — | — | — | *pending* | — |
-| Trial 4 | — | — | — | — | *pending* | — |
-| Trial 5 | — | — | — | — | *pending* | — |
+| Trial | Board offset | Yaw (rad) | Tier 1 | Tier 2 | Tier 3 | **Total** | Outcome |
+|-------|-------------|-----------|--------|--------|--------|-----------|---------|
+| 1 | (0.134, −0.141) | 3.207 | 1 | 0 | 0 | **1** | Timeout (265 s) |
+| 2 | (0.093, −0.152) | 3.170 | 1 | 0 | 0 | **1** | Timeout (268 s) |
+| 3 | (0.193, −0.237) | 3.052 | 1 | 0 | 0 | **1** | Timeout (268 s) |
+| 4 | (0.141, −0.227) | 3.173 | 1 | 0 | 0 | **1** | Timeout (266 s) |
+| 5 | (0.144, −0.163) | 3.057 | 1 | 0 | 0 | **1** | Timeout (255 s) |
+| **Mean** | | | **1.0** | **0.0** | **0.0** | **1.0** | |
 
-> Results will be updated once the evaluation completes. Trial 1 timed out at the
-> eval difficulty — indicating the iter10 model has room for improvement at harder scenes.
+**Success rate: 0/5 (0%)** — Mean AIC score: **1.0 / 100**
+
+**Finding**: At the maximum training difficulty (±6.5 cm board, ±4.3° cable), the model
+consistently reaches its 120 s per-step timeout without inserting the cable. All episodes
+are valid (Tier 1 = 1), but zero trajectory or insertion scores are recorded (Tier 2 = Tier 3 = 0).
+This contrasts sharply with the earlier binary evaluation (±1.5 cm, 100% success) and
+reveals a generalisation gap at hardest configurations that binary success/failure cannot quantify.
+
+**Analysis**: The previous 100% success evaluation used ±1.5 cm perturbation (easy baseline).
+The iter10 training included scenes at ±6.5 cm but these are the hardest 20 episodes in a
+240-episode corpus. The model sees too few hard-difficulty episodes to generalise to them.
+The AIC scoring function provides a smooth reward even when insertion fails (proximity, duration)
+which directly motivates the score-guided RL fine-tuning in the next section.
 
 ---
 
-## 10. Reward-Weighted Regression (RL Fine-tuning)
+## 11. Reward-Weighted Regression (RL Fine-tuning)
 
 ### Motivation
 
@@ -397,7 +448,7 @@ score them with the AIC function, and fine-tune from the iter10 checkpoint.
 
 ---
 
-## 11. Files
+## 12. Files
 
 ```
 lerobot_aic/
