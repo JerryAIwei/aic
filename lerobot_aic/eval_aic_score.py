@@ -336,8 +336,10 @@ def _parse_trial_logs(log_dir: Path) -> dict:
             if t1_val >= 1:
                 raw["valid"] = True
 
-        # Insertion event topic (backup detection)
-        if re.search(r"insertion_event|cable.*insert.*success|insert.*success",
+        # Insertion event topic — only match actual event messages, not config parsing.
+        # The engine logs "insertion_event" as a topic name in config output;
+        # only trigger on explicit success messages to avoid false positives.
+        if re.search(r"cable successfully inserted|insertion complete|insert.*success.*event",
                      clean, re.IGNORECASE):
             raw["valid"] = True
             if raw["insertion_result"] == "none":
