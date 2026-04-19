@@ -635,6 +635,66 @@ python train_vision_fast.py \
     --finetune_from checkpoints_diffusion_vision_fast_v1/best_model
 ```
 
+### AIC Scoring Results (vision_fast_v2)
+
+Evaluated with `eval_aic_score.py --n_trials 5` at board ±3 cm / ±5° difficulty:
+
+| Trial | Board (x, y) | Insertion | Total | T1 | T2 | T3 |
+|-------|-------------|-----------|-------|----|----|-----|
+| 1 | (0.142, −0.173) | none | 1.0 | 1.0 | 0.0 | 0.0 |
+| 2 | (0.123, −0.178) | none | 1.0 | 1.0 | 0.0 | 0.0 |
+| 3 | — | none | 1.0 | 1.0 | 0.0 | 0.0 |
+| 4 | — | none | 1.0 | 1.0 | 0.0 | 0.0 |
+| 5 | — | none | −23.0 | 1.0 | −24.0 | 0.0 |
+| **Mean** | | | **−3.8** | **1.0** | **−4.8** | **0.0** |
+
+**Success rate: 0 / 5** — identical to the iter10 baseline (also 0/5).
+
+Trial 5 triggered an off-limit contact penalty (T2 = −24), suggesting the
+fine-tuned weights slightly shifted the trajectory into a contact region.
+Overall, the vision fine-tune did not improve insertion success.
+
+### Root Cause Analysis
+
+| Metric | iter10 | Vision fine-tune v2 |
+|--------|--------|---------------------|
+| Val loss (training) | ~0.023 | 0.00677 (3.4× better) |
+| Success rate | 0 / 5 | 0 / 5 |
+| Behaviour | Memorised traj | Memorised traj (slightly shifted) |
+
+**Why val loss improved but behavior did not:**
+
+The val loss dropped from 0.023 → 0.0068 because the model overfit less
+(fine-tune LR = 5×10⁻⁶ vs training LR = 1×10⁻⁴) and augmentation regularised the
+visual encoder. However, the training data still has ±2 cm board variation
+(inter-episode image std ≈ 0.015 vs iter10's 0.008 — only 2× better). The
+ResNet spatial softmax still sees the port at nearly the same pixel location
+across all 21 episodes, so it still learns a memorised trajectory rather than
+visual port navigation.
+
+**What is actually required:**
+
+> The fundamental barrier is not a training or inference bug — it is a data
+> diversity gap. To train a vision-guided policy, the port must appear at
+> genuinely different image locations across training episodes, which requires
+> ≥±10 cm board variation (≈25 px shift at 128 px/50 cm FOV).
+
+The simulation controller loading issue (aic_controller / fts_broadcaster spawner
+failures) prevented collection of high-variation episodes in this session.
+When that issue is resolved, the following pipeline will enable true visual navigation:
+
+```bash
+# Collect 30 high-variation episodes (±10 cm board)
+python collect_sim_demos.py --n_episodes 30 --board_range 0.10 \
+    --dataset_name local/aic_cable_insertion_vision_10cm
+
+# Fast in-memory fine-tune on high-variation data
+python train_vision_fast.py \
+    --npz_dir /tmp/aic_recordings  \   # new ±10 cm recordings
+    --finetune_from checkpoints_diffusion_iter10/best_model \
+    --steps 6000 --lr 1e-5 --run_name vision_10cm
+```
+
 ### Training Data Diagnostics
 
 | Metric | iter10 dataset | Vision fine-tune data |

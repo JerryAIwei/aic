@@ -412,7 +412,8 @@ def _build_trial_dict(raw: dict) -> dict:
 # ── One trial runner ──────────────────────────────────────────────────────────
 
 def run_trial(ckpt_path: str, scenario: dict, trial_id: str,
-              results_dir: Path, timeout: int = 360) -> dict:
+              results_dir: Path, timeout: int = 360,
+              policy_class: str = "aic_example_policies.ros.RunSimDiffusion") -> dict:
     _cleanup()
     CONFIG_DIR.mkdir(exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -422,7 +423,12 @@ def run_trial(ckpt_path: str, scenario: dict, trial_id: str,
     cfg_path = CONFIG_DIR / f"{trial_id}.yaml"
     _write_eval_config(scenario, cfg_path)
 
-    env = _ros_env({"AIC_DIFFUSION_CKPT": ckpt_path})
+    # Map policy class to the right checkpoint env var
+    if "VisionDiffusion" in policy_class or "vision" in policy_class.lower():
+        ckpt_env = {"AIC_VISION_CKPT": ckpt_path}
+    else:
+        ckpt_env = {"AIC_DIFFUSION_CKPT": ckpt_path}
+    env = _ros_env(ckpt_env)
 
     zenoh = _popen("ros2 run rmw_zenoh_cpp rmw_zenohd",
                    log=log_dir / "zenoh.log", env=env)
@@ -443,7 +449,7 @@ def run_trial(ckpt_path: str, scenario: dict, trial_id: str,
     policy = _popen(
         "ros2 run aic_model aic_model "
         "--ros-args -p use_sim_time:=true "
-        "-p policy:=aic_example_policies.ros.RunSimDiffusion",
+        f"-p policy:={policy_class}",
         log=log_dir / "policy.log", env=env,
     )
 
@@ -515,15 +521,21 @@ def main():
     p.add_argument("--seed",       type=int, default=42)
     p.add_argument("--timeout",    type=int, default=360,
                    help="Per-trial timeout (s)")
+    p.add_argument("--policy",     default="aic_example_policies.ros.RunSimDiffusion",
+                   help="Policy class to evaluate "
+                        "(e.g. aic_example_policies.ros.RunVisionDiffusion)")
     args = p.parse_args()
 
     ckpt = str(Path(args.checkpoint).resolve())
+    policy_class = args.policy
     scenarios = gen_eval_scenarios(args.n_trials, seed=args.seed)
     trial_scores = []
 
+    model_tag = policy_class.split(".")[-1]
     print(f"\n{'='*65}")
-    print(f"  AIC Scoring Evaluation — iter10 model")
+    print(f"  AIC Scoring Evaluation — {model_tag}")
     print(f"  Checkpoint : {ckpt}")
+    print(f"  Policy     : {policy_class}")
     print(f"  Trials     : {args.n_trials}  (seed={args.seed})")
     print(f"  Difficulty : board ±3 cm / ±5°, cable ±2.9°")
     print(f"{'='*65}")
@@ -531,13 +543,14 @@ def main():
     results_dir = Path(args.output).parent / "eval_trials"
 
     for i, sc in enumerate(scenarios):
-        trial_id = f"iter10_trial{i+1:02d}"
+        trial_id = f"{model_tag}_trial{i+1:02d}"
         print(f"\n  [{i+1:2d}/{args.n_trials}] {trial_id}")
         print(f"    board=({sc['task_board_x']:.3f}, {sc['task_board_y']:.3f})  "
               f"yaw={sc['task_board_yaw']:.3f}  "
               f"cable_roll={sc['cable_roll']:.3f}")
 
-        score = run_trial(ckpt, sc, trial_id, results_dir, timeout=args.timeout)
+        score = run_trial(ckpt, sc, trial_id, results_dir,
+                          timeout=args.timeout, policy_class=policy_class)
         trial_scores.append(score)
 
         ins    = score["raw"]["insertion_result"]
