@@ -291,11 +291,15 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 def _cleanup_stale_nodes() -> None:
-    """Kill any lingering aic_model / zenoh / gazebo processes from prior runs."""
-    for pattern in ["aic_model", "rmw_zenohd", "gz_server", "gzserver"]:
-        subprocess.run(["pkill", "-9", "-f", pattern],
-                       capture_output=True)
-    time.sleep(2)
+    """Kill any lingering ROS/Gazebo processes from prior runs."""
+    for pattern in [
+        "aic_model", "rmw_zenohd", "gz_server", "gzserver",
+        "component_container", "aic_engine", "aic_adapter",
+        "aic_bringup", "robot_state_pub", "ros_gz", "spawner",
+        "ros2 launch", "gz sim",
+    ]:
+        subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True)
+    time.sleep(4)
 
 
 # ── episode runner ────────────────────────────────────────────────────────────
