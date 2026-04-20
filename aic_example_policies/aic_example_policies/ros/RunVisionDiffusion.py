@@ -21,6 +21,7 @@ Policy parameter for aic_model:
 """
 
 import os
+import time
 from pathlib import Path
 
 import cv2
@@ -43,14 +44,13 @@ from std_msgs.msg import Header
 CKPT_DIR = Path(
     os.environ.get(
         "AIC_VISION_CKPT",
-        "/workspace/aic/lerobot_aic/checkpoints_diffusion_vision_fast_v2/best_model",
+        "/workspace/aic/lerobot_aic/checkpoints_diffusion_vision_10cm_v2/best_model",
     )
 )
-# Use iter10 stats for normalization (primary dataset from fine-tuning).
-# Override with AIC_VISION_DATASET env var if a combined dataset was built.
+# Use 10cm dataset stats for normalization (matches training distribution).
 DATASET_ID = os.environ.get(
     "AIC_VISION_DATASET",
-    "local/aic_cable_insertion_iter10",
+    "local/aic_cable_insertion_10cm",
 )
 
 IMG_H, IMG_W = 128, 144
@@ -142,6 +142,13 @@ class RunVisionDiffusion(Policy):
         self.get_logger().info("RunVisionDiffusion.insert_cable() start")
         self.model.reset()
 
+        # Wait for the first valid observation before starting the policy loop.
+        obs = get_observation()
+        while obs is None:
+            self.sleep_for(0.05)
+            obs = get_observation()
+        self.get_logger().info("RunVisionDiffusion: first observation received, starting loop")
+
         max_steps = 2400    # 120 s at 20 Hz
         send_feedback("RunVisionDiffusion: running vision-guided diffusion policy")
 
@@ -188,7 +195,7 @@ class RunVisionDiffusion(Policy):
                 orientation=Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]),
             )
             self.set_pose_target(move_robot=move_robot, pose=target_pose)
-            self.sleep_for(dt)
+            time.sleep(dt)   # real-time pace; sim-clock sleep_for blocks after CUDA warmup
 
             if step % 50 == 0:
                 send_feedback(f"RunVisionDiffusion: step {step}/{max_steps}")

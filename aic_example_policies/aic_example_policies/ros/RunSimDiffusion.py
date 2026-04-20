@@ -21,6 +21,7 @@ Policy parameter for aic_model:
 """
 
 import os
+import time
 from pathlib import Path
 
 import cv2
@@ -168,6 +169,13 @@ class RunSimDiffusion(Policy):
         self.get_logger().info("RunSimDiffusion.insert_cable() start")
         self.model.reset()   # clear model's internal obs/action queues
 
+        # Wait for the first valid observation before starting the policy loop.
+        obs = get_observation()
+        while obs is None:
+            self.sleep_for(0.05)
+            obs = get_observation()
+        self.get_logger().info("RunSimDiffusion: first observation received, starting loop")
+
         max_steps = 2400    # 120 s at 20 Hz — matches engine time_limit
         send_feedback("RunSimDiffusion: running diffusion policy")
 
@@ -224,7 +232,7 @@ class RunSimDiffusion(Policy):
                 orientation=Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]),
             )
             self.set_pose_target(move_robot=move_robot, pose=target_pose)
-            self.sleep_for(dt)
+            time.sleep(dt)   # real-time pace; sim-clock sleep_for blocks after CUDA warmup
 
             if step % 50 == 0:
                 send_feedback(f"RunSimDiffusion: step {step}/{max_steps}")
