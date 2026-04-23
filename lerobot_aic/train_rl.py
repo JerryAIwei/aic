@@ -45,9 +45,19 @@ SAVE_DIR  = Path("/tmp/aic_recordings")
 MLP_DIR   = Path("/tmp/mlp_rl")
 ROOTFS    = "/opt/aic_rootfs"
 ROS_SETUP = "/ws_aic/install/setup.bash"
-STATE_DIM  = 26
+STATE_DIM_FULL = 26   # full observation vector
+STATE_DIM  = 14       # robust features only: TCP pose (7) + joint positions (7)
 ACTION_DIM = 6
 FPS = 20
+
+# Indices into the 26-D observation that are ROBUST (same semantics in demo and RL env):
+#   0-6:  TCP pose (xyz + quaternion) — always the actual TCP pose, no mismatch
+#   19-25: joint positions            — always the actual joint angles, no mismatch
+# Excluded (semantic mismatch between CheatCode demos and MLP policy RL env):
+#   7-12:  tcp_velocity               — differs (CheatCode drives robot actively; MLP is slower)
+#   13-18: tcp_error                  — CRITICAL MISMATCH: CheatCode keeps error at ~3.2cm below;
+#                                       MLP policy keeps error near 0 (target=current TCP)
+_ROBUST_IDX = list(range(7)) + list(range(19, 26))   # 14 features
 
 # Standard scenario config (fixed board, no variation) for reproducible RL rollouts
 _FIXED_TRIAL_CONFIG = """# Fixed-scenario config for RL training
@@ -234,7 +244,10 @@ class ActorCritic(nn.Module):
 # ── BC Pre-training ────────────────────────────────────────────────────────────
 
 def load_npz_episodes(npz_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load all ep_*.npz files. Returns (states, actions, port_pos_estimate).
+    """Load all ep_*.npz files. Returns (robust_states, actions, port_pos_estimate).
+
+    robust_states uses only _ROBUST_IDX features (TCP pose + joints, 14D)
+    to avoid the tcp_velocity / tcp_error mismatch between demo and RL environments.
 
     port_pos_estimate is the mean TCP position over the last 20 frames of each
     successful episode — a good proxy for the insertion port location.
@@ -248,18 +261,20 @@ def load_npz_episodes(npz_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
         d = np.load(str(f))
         if "states" not in d or len(d["states"]) < 10:
             continue
-        all_states.append(d["states"].astype(np.float32))
+        # Select only the robust feature indices (14D)
+        all_states.append(d["states"][:, _ROBUST_IDX].astype(np.float32))
         all_actions.append(d["actions"].astype(np.float32))
         final_tcps.append(d["states"][-20:, :3].mean(0))  # xyz mean of last 20 frames
 
     if not all_states:
         raise RuntimeError("All npz files are empty or invalid.")
 
-    states   = np.concatenate(all_states,  axis=0)   # (N, 26)
+    states   = np.concatenate(all_states,  axis=0)   # (N, 14) robust only
     actions  = np.concatenate(all_actions, axis=0)   # (N,  6)
     port_pos = np.array(final_tcps).mean(0)          # (3,) estimated port xyz
 
     print(f"Loaded {len(files)} episodes → {len(states):,} steps")
+    print(f"Robust state dim: {states.shape[1]}  (features: TCP-pose 7D + joints 7D)")
     print(f"Port position estimate (mean final TCP): {port_pos.round(4)}")
     return states, actions, port_pos
 
@@ -271,18 +286,26 @@ def compute_normalization(states: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def bc_pretrain(model: ActorCritic, states: np.ndarray, actions: np.ndarray,
-                state_mean: np.ndarray, state_std: np.ndarray,
+                port_pos: np.ndarray, state_mean: np.ndarray, state_std: np.ndarray,
                 steps: int = 2000, batch_size: int = 256, lr: float = 3e-4,
+                gamma: float = 0.99,
                 device: torch.device = torch.device("cpu")) -> None:
-    """Behavioral cloning: minimize MSE between predicted and demonstrated actions."""
+    """Behavioral cloning + critic pre-training.
+
+    Phase A: MSE actor loss on demonstrated actions.
+    Phase B: Critic pre-training — predict the potential-based return from BC trajectories.
+    Pre-training the critic prevents huge VF loss during early RL iterations.
+    """
+    # ── Phase A: Actor MSE ────────────────────────────────────────────────────
     model.train()
-    optimizer = Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    actor_params  = list(model.trunk.parameters()) + list(model.actor_mean.parameters())
+    actor_opt     = Adam(actor_params, lr=lr, weight_decay=1e-5)
 
     states_t  = torch.from_numpy((states  - state_mean) / state_std).float().to(device)
     actions_t = torch.from_numpy(actions).float().to(device)
     N = len(states_t)
 
-    print(f"\n── BC Pre-training ({steps} gradient steps, batch={batch_size}) ──")
+    print(f"\n── BC Phase A: Actor MSE ({steps} steps, batch={batch_size}) ──")
     best_loss = float("inf")
     for step in range(steps):
         idx   = torch.randint(0, N, (batch_size,))
@@ -291,39 +314,91 @@ def bc_pretrain(model: ActorCritic, states: np.ndarray, actions: np.ndarray,
         mean, _, _ = model(s_b)
         loss = F.mse_loss(mean, a_b)
 
-        optimizer.zero_grad()
+        actor_opt.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
+        actor_opt.step()
 
         if loss.item() < best_loss:
             best_loss = loss.item()
         if (step + 1) % 500 == 0:
             print(f"  step {step+1:5d}/{steps}  loss={loss.item():.6f}  best={best_loss:.6f}")
 
-    print(f"BC done. Best loss: {best_loss:.6f}")
+    print(f"BC Phase A done. Best actor loss: {best_loss:.6f}")
+
+    # ── Phase B: Critic pre-training on BC trajectory returns ─────────────────
+    # Compute potential-based returns for each BC trajectory (reloaded from files)
+    print(f"\n── BC Phase B: Critic pre-train ──")
+    # Only update the critic head — keep trunk frozen so Phase A actor weights are preserved
+    critic_opt = Adam(model.critic.parameters(), lr=lr, weight_decay=1e-5)
+
+    # Build (state, return) pairs from BC episodes
+    # Split states/actions back into per-episode chunks using action discontinuities
+    # (simpler: just use random 400-step windows as pseudo-episodes)
+    chunk = 400
+    all_ret = []
+    for start in range(0, N - chunk, chunk):
+        ep_s = states[start: start + chunk]
+        _, ep_ret = compute_rewards_and_returns(ep_s, port_pos, gamma=gamma)
+        all_ret.append(ep_ret)
+    bc_returns = np.concatenate(all_ret, axis=0)
+    bc_states  = np.concatenate([states[i: i + chunk]
+                                 for i in range(0, N - chunk, chunk)], axis=0)
+    R = len(bc_states)
+    bc_s_t   = torch.from_numpy((bc_states  - state_mean) / state_std).float().to(device)
+    bc_ret_t = torch.from_numpy(bc_returns).float().to(device)
+
+    for step in range(1000):
+        idx = torch.randint(0, R, (batch_size,))
+        _, _, val = model(bc_s_t[idx])
+        v_loss = F.mse_loss(val, bc_ret_t[idx])
+
+        critic_opt.zero_grad()
+        v_loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        critic_opt.step()
+
+        if (step + 1) % 250 == 0:
+            print(f"  critic step {step+1:4d}/1000  v_loss={v_loss.item():.4f}")
+
+    print(f"BC Phase B done.")
     model.eval()
 
 
 # ── Reward & Return computation ────────────────────────────────────────────────
 
+TARGET_Z = 0.1905   # port height (consistent across ALL scenarios — z doesn't change with board XY)
+
+
 def compute_rewards_and_returns(
     states: np.ndarray, port_pos: np.ndarray, gamma: float = 0.99
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Dense port-proximity reward + discounted returns.
+    """Mixed reward: z-approach (reliable) + 3D proximity bonus.
 
-    reward_t = exp(-20 * ||tcp_t - port||) - 0.5
-      → peaks at +0.5 (at port), baseline near -0.5 (far away)
+    Primary reward — z-axis approach (highly reliable: port z=0.190 is the same
+    for ALL board configurations regardless of XY variation):
+        r_z_t = (|z_{t-1} - TARGET_Z| - |z_t - TARGET_Z|) * 200
+        Positive when moving toward target height, negative when moving away.
 
-    Near-port bonus: +2.0 for last 10 steps if within 2 cm.
+    Secondary reward — 3D proximity bonus (softer, using mean port pos estimate):
+        r_prox_t = exp(-10 * ||tcp_t - port_pos||) * 0.3
+        Provides a continuous incentive to stay close to the port.
+
+    Combined: policy learns to go DOWN to z=0.190 while staying near (x,y)≈port_pos.
     """
     tcp_pos = states[:, :3]                                    # (T, 3)
-    dists   = np.linalg.norm(tcp_pos - port_pos, axis=1)      # (T,)
-    rewards = np.exp(-20.0 * dists) - 0.5                     # (T,) dense
+    z_pos   = tcp_pos[:, 2]                                    # (T,) z coord
 
-    # Bonus for close approach at end of episode
-    close_mask = (dists[-10:] < 0.02).astype(np.float32)
-    rewards[-10:] += close_mask * 2.0
+    # Z-approach reward (primary, reliable)
+    z_dist  = np.abs(z_pos - TARGET_Z)                        # (T,) distance from target z
+    z_delta = np.diff(z_dist, prepend=z_dist[0])              # (T,) Δz_dist (negative = good)
+    r_z     = -z_delta * 200.0                                # scale: 1cm z-approach = +2.0
+
+    # 3D proximity bonus (secondary, informative)
+    dists_3d = np.linalg.norm(tcp_pos - port_pos, axis=1)     # (T,)
+    r_prox   = np.exp(-10.0 * dists_3d) * 0.3                # peaks at 0.3 when at port
+
+    rewards = r_z + r_prox                                     # (T,)
 
     # Discounted returns (backwards pass)
     T = len(rewards)
@@ -345,23 +420,43 @@ def ppo_update(
     actions: torch.Tensor,       # (T, 6)
     old_log_probs: torch.Tensor, # (T,)
     returns: torch.Tensor,       # (T,) discounted
-    n_epochs: int = 4,
+    bc_model: ActorCritic | None = None,  # frozen BC reference (for KL constraint)
+    n_epochs: int = 1,
     batch_size: int = 512,
-    clip_eps: float = 0.2,
+    clip_eps: float = 0.05,     # very conservative: 5% probability ratio change
     vf_coef: float = 0.5,
-    ent_coef: float = 0.01,
+    kl_coef: float = 0.5,       # KL penalty weight vs BC reference policy
     device: torch.device = torch.device("cpu"),
 ) -> dict:
-    """One PPO update cycle over the collected trajectory."""
+    """Conservative PPO update with BC-KL regularization.
+
+    Unlike standard PPO, this version:
+    1. Uses a tight clip (0.05) to prevent large policy changes per iteration.
+    2. Freezes actor_log_std (no entropy tuning) to keep action std stable.
+    3. Adds a KL divergence penalty from the reference BC policy to prevent drift.
+       This mirrors RLHF's reference-policy constraint.
+    4. Single epoch over the trajectory (n_epochs=1 default).
+
+    The KL term: E[KL(current || bc)] keeps the RL policy close to the BC prior
+    while allowing the policy gradient to push it toward higher reward.
+    """
     T = len(states)
 
     with torch.no_grad():
         _, _, values = model(states)
+        if bc_model is not None:
+            bc_mean, bc_std, _ = bc_model(states)
+
     advantages = (returns - values).detach()
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-    agg = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+    agg = {"policy_loss": 0.0, "value_loss": 0.0, "kl_bc": 0.0}
     n = 0
+
+    # Freeze actor_log_std — do NOT allow RL to change action std
+    # (prevents entropy from exploding and making actions erratic)
+    saved_std_grad = model.actor_log_std.requires_grad
+    model.actor_log_std.requires_grad_(False)
 
     model.train()
     for _ in range(n_epochs):
@@ -378,9 +473,8 @@ def ppo_update(
             olp_b = old_log_probs[idx]
 
             mean, std, val = model(s_b)
-            dist      = torch.distributions.Normal(mean, std)
-            new_lp    = dist.log_prob(a_b).sum(-1)
-            entropy   = dist.entropy().sum(-1).mean()
+            dist   = torch.distributions.Normal(mean, std)
+            new_lp = dist.log_prob(a_b).sum(-1)
 
             ratio = torch.exp(new_lp - olp_b)
             surr  = torch.min(
@@ -389,7 +483,18 @@ def ppo_update(
             )
             p_loss = -surr.mean()
             v_loss = F.mse_loss(val, ret_b)
-            loss   = p_loss + vf_coef * v_loss - ent_coef * entropy
+
+            # BC-KL regularization: penalize drift from original BC policy
+            kl_loss = torch.zeros(1, device=device)
+            if bc_model is not None:
+                bc_m_b = bc_mean[idx].detach()
+                bc_s_b = bc_std[idx].detach()
+                # KL(current || bc): symmetric approximate form
+                var_ratio = (std / bc_s_b) ** 2
+                kl_loss   = 0.5 * (var_ratio + ((mean - bc_m_b) / bc_s_b) ** 2
+                                   - 1 - torch.log(var_ratio + 1e-8)).sum(-1).mean()
+
+            loss = p_loss + vf_coef * v_loss + kl_coef * kl_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -398,9 +503,10 @@ def ppo_update(
 
             agg["policy_loss"] += p_loss.item()
             agg["value_loss"]  += v_loss.item()
-            agg["entropy"]     += entropy.item()
+            agg["kl_bc"]       += kl_loss.item()
             n += 1
 
+    model.actor_log_std.requires_grad_(saved_std_grad)
     model.eval()
     return {k: v / max(n, 1) for k, v in agg.items()}
 
@@ -501,7 +607,7 @@ def run_rl_episode(ep_idx: int) -> Path | None:
     policy = _popen(
         "ros2 run aic_model aic_model "
         "--ros-args -p use_sim_time:=true "
-        "-p policy:=aic_example_policies.ros.RunMLPPolicy.RunMLPPolicy",
+        "-p policy:=aic_example_policies.ros.RunMLPPolicy",
         log=log_dir / f"policy_{ep_idx}.log", env=env,
     )
     time.sleep(2)
@@ -516,9 +622,9 @@ def run_rl_episode(ep_idx: int) -> Path | None:
         f"aic_engine_config_file:={cfg_path}",
         log=log_dir / f"sim_{ep_idx}.log", env=env,
     )
-    time.sleep(40)  # wait for Gazebo + controller to fully start
+    time.sleep(50)  # wait for Gazebo + controller to fully start
 
-    ep_path = _wait_for_episode(timeout=220)
+    ep_path = _wait_for_episode(timeout=280)
 
     for proc in [policy, sim, zenoh]:
         _kill(proc)
@@ -599,6 +705,9 @@ def main():
     model     = ActorCritic(STATE_DIM, ACTION_DIM, hidden=256).to(device)
     optimizer = Adam(model.parameters(), lr=args.lr)
 
+    # BC reference model (frozen copy used for KL regularization)
+    bc_ref_model = ActorCritic(STATE_DIM, ACTION_DIM, hidden=256).to(device)
+
     # ── 3. BC pre-train (or load) ─────────────────────────────────────────────
     weights_path = MLP_DIR / "weights.pt"
     if args.skip_bc and weights_path.exists():
@@ -610,9 +719,15 @@ def main():
             model.load_state_dict(ckpt)
         model.eval()
     else:
-        bc_pretrain(model, states, actions, state_mean, state_std,
-                    steps=args.bc_steps, device=device)
+        bc_pretrain(model, states, actions, port_pos, state_mean, state_std,
+                    steps=args.bc_steps, gamma=args.gamma, device=device)
         save_checkpoint(model, optimizer, 0, state_mean, state_std, port_pos, ckpt_dir)
+
+    # Freeze a copy of the BC weights as the reference policy
+    bc_ref_model.load_state_dict(model.state_dict())
+    bc_ref_model.eval()
+    for p in bc_ref_model.parameters():
+        p.requires_grad_(False)
 
     # Write config for RunMLPPolicy
     save_config(state_mean, state_std, port_pos)
@@ -627,9 +742,9 @@ def main():
     # ── 4. RL loop ────────────────────────────────────────────────────────────
     history = []
     print(f"\n── RL Fine-tuning ({args.rl_iter} iterations) ──")
-    print(f"{'Iter':>5}  {'Steps':>6}  {'MeanR':>8}  {'FinDist':>8}  "
-          f"{'PLoss':>8}  {'VLoss':>8}  {'Elapsed':>7}")
-    print("─" * 65)
+    print(f"{'Iter':>5}  {'Steps':>6}  {'ZAppr':>6}  {'ZFin':>7}  "
+          f"{'PLoss':>8}  {'VLoss':>8}  {'KL_BC':>7}  {'Elapsed':>7}")
+    print("─" * 70)
 
     for iteration in range(1, args.rl_iter + 1):
         t0 = time.time()
@@ -645,14 +760,15 @@ def main():
             continue
 
         # c. Load trajectory (states-only npz saved by RunMLPPolicy)
-        d          = np.load(str(ep_path))
-        ep_states  = d["states"].astype(np.float32)   # (T, 26)
-        ep_actions = d["actions"].astype(np.float32)  # (T, 6)
+        d              = np.load(str(ep_path))
+        ep_states_full = d["states"].astype(np.float32)   # (T, 26) full state
+        ep_states      = ep_states_full[:, _ROBUST_IDX]   # (T, 14) robust features only
+        ep_actions     = d["actions"].astype(np.float32)  # (T, 6)
         T = len(ep_states)
 
-        # d. Compute rewards and returns
-        rewards, returns = compute_rewards_and_returns(ep_states, port_pos, gamma=args.gamma)
-        final_dist  = float(np.linalg.norm(ep_states[-1, :3] - port_pos))
+        # d. Compute rewards and returns (uses full state for TCP xyz in indices 0-2)
+        rewards, returns = compute_rewards_and_returns(ep_states_full, port_pos, gamma=args.gamma)
+        final_dist  = float(np.linalg.norm(ep_states_full[-1, :3] - port_pos))
         mean_reward = float(rewards.mean())
 
         # e. Build tensors
@@ -666,27 +782,38 @@ def main():
             dist_pred = torch.distributions.Normal(mean_pred, std_pred)
             old_lp    = dist_pred.log_prob(a_t).sum(-1)
 
-        # f. PPO update
+        # f. PPO update with BC-KL regularization
         metrics = ppo_update(
             model, optimizer, s_t, a_t, old_lp, ret_t,
-            n_epochs=4, batch_size=512, device=device,
+            bc_model=bc_ref_model,
+            n_epochs=1, batch_size=256, clip_eps=0.05,
+            kl_coef=0.5, device=device,
         )
+
+        # Z-distance at final step (primary metric: port z = 0.190)
+        # Use full state (index 2 = tcp.z) for these metrics
+        final_z_dist = float(abs(ep_states_full[-1, 2] - TARGET_Z))
+        # Approach rate: fraction of steps where z moved toward 0.190
+        z_pos  = ep_states_full[:, 2]
+        z_appr = float((np.diff(np.abs(z_pos - TARGET_Z)) < 0).mean())
 
         elapsed = time.time() - t0
         entry = {
-            "iteration":   iteration,
-            "steps":       T,
-            "mean_reward": mean_reward,
-            "final_dist_m": final_dist,
+            "iteration":       iteration,
+            "steps":           T,
+            "mean_reward":     mean_reward,
+            "final_dist_m":    final_dist,
+            "z_approach_rate": z_appr,
+            "final_z_dist":    final_z_dist,
             **metrics,
             "elapsed_s": elapsed,
         }
         history.append(entry)
         json.dump(history, open(out_dir / "rl_history.json", "w"), indent=2)
 
-        print(f"{iteration:>5}  {T:>6}  {mean_reward:>8.4f}  {final_dist:>8.4f}  "
+        print(f"{iteration:>5}  {T:>6}  {z_appr:>6.3f}  {final_z_dist:>7.4f}  "
               f"{metrics['policy_loss']:>8.4f}  {metrics['value_loss']:>8.4f}  "
-              f"{elapsed:.0f}s")
+              f"{metrics['kl_bc']:>7.4f}  {elapsed:.0f}s")
 
         # g. Checkpoint every 5 iterations
         if iteration % 5 == 0:

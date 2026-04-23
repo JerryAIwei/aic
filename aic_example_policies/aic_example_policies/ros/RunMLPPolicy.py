@@ -35,8 +35,12 @@ from geometry_msgs.msg import Point, Pose, Quaternion
 
 MLP_DIR  = Path(os.environ.get("MLP_RL_DIR", "/tmp/mlp_rl"))
 SAVE_DIR = Path("/tmp/aic_recordings")
-STATE_DIM  = 26
+STATE_DIM_FULL = 26
+STATE_DIM  = 14   # robust features: TCP pose (7) + joints (7)
 ACTION_DIM = 6
+
+# Same robust feature indices as train_rl.py (skips tcp_velocity and tcp_error)
+_ROBUST_IDX = list(range(7)) + list(range(19, 26))
 
 
 # ── Network (must stay in sync with train_rl.py ActorCritic) ─────────────────
@@ -65,8 +69,8 @@ class ActorCritic(nn.Module):
 
 # ── State extraction ──────────────────────────────────────────────────────────
 
-def _obs_to_state(obs) -> np.ndarray:
-    """Extract 26-D state vector from Observation message (matches train_rl.py ordering)."""
+def _obs_to_full_state(obs) -> np.ndarray:
+    """Extract full 26-D state vector from Observation message."""
     cs  = obs.controller_state
     tcp = cs.tcp_pose
     vel = cs.tcp_velocity
@@ -78,6 +82,12 @@ def _obs_to_state(obs) -> np.ndarray:
         *list(cs.tcp_error),
         *list(obs.joint_states.position[:7]),
     ], dtype=np.float32)
+
+
+def _obs_to_robust_state(obs) -> np.ndarray:
+    """Extract 14-D ROBUST state (TCP pose 7D + joints 7D), skipping tcp_velocity/tcp_error."""
+    full = _obs_to_full_state(obs)
+    return full[_ROBUST_IDX]    # (14,)
 
 
 # ── Policy class ──────────────────────────────────────────────────────────────
@@ -131,7 +141,7 @@ class RunMLPPolicy(Policy):
             obs = get_observation()
         self.get_logger().info("RunMLPPolicy: first observation received, starting loop")
 
-        max_steps = 2400    # 120 s at 20 Hz
+        max_steps = 600     # 30 s at 20 Hz (≈54 real s at 0.56× sim speed; covers demo length)
         dt = 1.0 / 20.0
         send_feedback("RunMLPPolicy: running BC+PPO MLP policy")
 
@@ -139,12 +149,16 @@ class RunMLPPolicy(Policy):
         actions_log = []
 
         for step in range(max_steps):
-            obs   = get_observation()
-            state = _obs_to_state(obs)
-            states_log.append(state)
+            obs = get_observation()
+            if obs is None:
+                self.get_logger().warn(f"RunMLPPolicy: obs=None at step {step}, ending early")
+                break
+            full_state   = _obs_to_full_state(obs)   # 26-D saved for RL reward computation
+            robust_state = full_state[_ROBUST_IDX]   # 14-D used for inference
+            states_log.append(full_state)
 
-            # Normalize and run actor
-            s_norm = (state - self.state_mean) / (self.state_std + 1e-8)
+            # Normalize and run actor (14-D input)
+            s_norm = (robust_state - self.state_mean) / (self.state_std + 1e-8)
             s_t    = torch.from_numpy(s_norm).float().unsqueeze(0).to(self.device)
 
             with torch.no_grad():
