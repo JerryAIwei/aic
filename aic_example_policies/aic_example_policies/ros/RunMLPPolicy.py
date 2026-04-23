@@ -202,7 +202,7 @@ class RunMLPPolicy(Policy):
             time.sleep(dt)   # real-time pace (not sim-clock, avoids CUDA-warmup deadlock)
 
             if step % 100 == 0:
-                tcp = state[:3]
+                tcp = full_state[:3]
                 send_feedback(
                     f"RunMLPPolicy: step {step}/{max_steps}  "
                     f"tcp=({tcp[0]:.3f},{tcp[1]:.3f},{tcp[2]:.3f})"
